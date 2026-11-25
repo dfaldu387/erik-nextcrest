@@ -1,0 +1,82 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Estately palette: warm cream page, white cards, purple brand, lavender tint for active states. */
+:root {
+  --background: 40 33% 96%;
+  --foreground: 222 47% 11%;
+  --card: 0 0% 100%;
+  --card-foreground: 222 47% 11%;
+  --muted: 220 20% 97%;
+  --muted-foreground: 215 19% 35%;
+  --border: 220 20% 94%;
+  --input: 220 20% 90%;
+  --ring: 263 70% 50%;
+  --primary: 263 70% 47%;
+  --primary-foreground: 0 0% 100%;
+  --accent: 262 100% 97%;
+  --accent-foreground: 263 70% 47%;
+  color-scheme: light;
+}
+
+.dark {
+  --background: 240 20% 6%;
+  --foreground: 210 40% 96%;
+  --card: 240 18% 10%;
+  --card-foreground: 210 40% 96%;
+  --muted: 240 14% 14%;
+  --muted-foreground: 215 20% 70%;
+  --border: 240 12% 20%;
+  --input: 240 12% 20%;
+  --ring: 263 80% 68%;
+  --primary: 263 80% 66%;
+  --primary-foreground: 240 20% 8%;
+  --accent: 263 40% 16%;
+  --accent-foreground: 263 90% 82%;
+  color-scheme: dark;
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  html {
+    @apply bg-background text-foreground;
+  }
+  body {
+    @apply bg-background font-sans text-sm antialiased;
+    min-height: 100vh;
+  }
+  :focus-visible {
+    @apply outline-none ring-2 ring-ring ring-offset-2 ring-offset-background;
+  }
+}
+
+@layer components {
+  .card {
+    @apply rounded-card border border-border bg-card shadow-sm;
+  }
+  .btn {
+    @apply inline-flex h-8 items-center justify-center gap-1.5 rounded-md px-3 text-[13px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .btn-primary {
+    @apply btn bg-primary text-primary-foreground hover:opacity-90;
+  }
+  .btn-secondary {
+    @apply btn border border-border bg-card text-foreground hover:bg-muted;
+  }
+  .btn-ghost {
+    @apply btn text-muted-foreground hover:bg-muted hover:text-foreground;
+  }
+  .field {
+    @apply h-9 rounded-md border border-input bg-card px-3 text-sm text-foreground placeholder:text-muted-foreground;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition-duration: 0ms !important;
+    animation-duration: 0ms !important;
+  }
+}

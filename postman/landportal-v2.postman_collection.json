@@ -1,0 +1,796 @@
+{
+  "info": {
+    "name": "Land Portal API v2",
+    "description": "Land Portal V2 API (https://api.landportal.com/v2). Set the landportalToken variable in the environment.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{landportalToken}}",
+        "type": "string"
+      }
+    ]
+  },
+  "item": [
+    {
+      "name": "Exports",
+      "item": [
+        {
+          "name": "GET /v2/exports",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v2/exports",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v2",
+                "exports"
+              ],
+              "query": [
+                {
+                  "key": "page_size",
+                  "value": "",
+                  "disabled": true,
+                  "description": "Maximum tasks to return."
+                },
+                {
+                  "key": "page_token",
+                  "value": "",
+                  "disabled": true,
+                  "description": "Opaque cursor from a prior response."
+                }
+              ]
+            },
+            "description": "List exports\n\nList export tasks owned by the authenticated account, newest first. Each record includes `request_source` (`property_ids`, `filter_id`, or `unknown` for legacy rows), and filter-backed records include `filter_id` but no filter revision, plus `total_rows`, `processed_rows`, and `progress_percent`; queued and processing tasks can therefore render durable progress while polling. Completed tasks include temporary CSV download URLs; failed tasks include status details and an error reason.\n\n## When to use\n\n- Showing recent export history in an integration dashboard.\n- Resuming polling after a client reconnects.\n- Paging through prior exports using `page_size` and `page_token`.\n"
+          },
+          "response": []
+        },
+        {
+          "name": "POST /v2/exports",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v2/exports",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v2",
+                "exports"
+              ],
+              "query": []
+            },
+            "description": "Create an export\n\nCreate a downloadable CSV file for selected properties. Submit either explicit\nproperty IDs or a `filter_id` returned by `POST /v2/filter-data`; the API queues\nthe export, resolves each property's county automatically, and returns an\n`export_id` that can be used to check progress. The returned task includes the\nsubmitted `filter_id` when the export is filter-backed.\n\nThe account's export row balance is charged when the task is created. For `property_ids`, the charge is the number of unique identifiers accepted. For `filter_id`, the charge is the number of properties the filter matches at that moment; because the task selects its properties while it runs, the final charge is adjusted to the exact row count and `rows` on the completed task is authoritative. The response includes export task creation metadata in `meta.rows_left`, the remaining export row balance after the task is created, and `request_source` set to `property_ids` or `filter_id`. Returns `403` when the charge exceeds the account's available export row balance.\n\nWithout an idempotency key, an identical request is deduplicated only while its\ntask is `queued` or `processing`. A completed, failed, or stopped request is a\nnew export and may consume a new charge.\n\n## Retry safely with Idempotency-Key (HTTP clients)\n\nFor every HTTP transport retry, send a client-generated `Idempotency-Key` header\n(up to 255 characters) and reuse it only for that same export request.\nThe API binds the key to the normalized `export_type` and either the unique\n`property_ids` or the submitted `filter_id`:\n\n- The same key and equivalent request return the original export task in any\n  status, including `completed`, without another charge.\n- The same key with different export input returns `409 conflict`. Generate a\n  new key for an intentional new export.\n- The key remains bound while its export task is retained. The header is\n  optional for backward compatibility, but retries without it have only the\n  in-flight protection described above.\n\nIf this request returns `429` or `503`, wait the number of seconds in the\n`Retry-After` response header before retrying. For the same export request,\nreuse the same `Idempotency-Key` after the wait.\n\n## When to use\n\n- Exporting property data for offline analysis or partner workflows.\n- Starting an asynchronous export and polling `GET /v2/exports/{export_id}` until it completes or fails.\n- Submitting explicit property identifiers, for example `37418027`.\n- Reusing a prior filter without rebuilding conditions or collecting property IDs. Pass only `filter_id` and the task selects the matching properties for you, however many there are.\n\n## Input choice\n\nProvide exactly one of `property_ids` or `filter_id`. Omit the field you are\nnot using entirely; sending it as an empty string or `null` fails validation\nwith a `422` response. A missing, deleted, or incompatible saved filter\nreturns a validation error before an export task is created, as does one that\ncurrently matches no properties.\n\nA `filter_id` task returns as soon as it is queued, without waiting for the\nmatching properties to be collected — so a filter matching many properties is\naccepted just as quickly as a small one. The task selects them against the\nimmutable saved definition. The current filter-data API does not edit filters,\nso later searches with that `filter_id` use the same definition. Filter-backed\ntasks use `filter_id` only; the public export API does not accept or return a\nfilter revision. To export different conditions, first submit a body-only\nfilter-data request and use its returned ID. A future filter-management API\nwill define any editing and revision behavior separately.\n\nA filter is resolved in the background in small Elasticsearch and database\nbatches. Its complete input is staged before CSV generation, so a large filter\ndoes not create one large Elasticsearch response or one large object-store\npayload. Poll `GET /v2/exports/{export_id}` for the outcome; `total_rows`\nreflects the estimated size while queued and the exact staged size once\nresolution completes.\n",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"export_type\": \"property_csv\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "GET /v2/exports/{export_id}",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v2/exports/{{export_id}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v2",
+                "exports",
+                "{{export_id}}"
+              ],
+              "query": []
+            },
+            "description": "Retrieve an export\n\nCheck the status of an export task owned by the authenticated account. The response includes `request_source` (`property_ids`, `filter_id`, or `unknown` for legacy rows) and `filter_id` for filter-backed exports; no filter revision is returned. A queued or processing task includes `total_rows`, `processed_rows`, and `progress_percent`. `processed_rows` counts rows durably written into the single resumable CSV object. A completed task includes a temporary CSV download URL, valid for **15 minutes**, and the number of rows in the file. A failed task includes a failure reason.\n\n## When to use\n\n- Checking whether a queued export is ready.\n- Refreshing an expired download URL for a completed export — calling this endpoint again issues a fresh 15-minute URL.\n- Reviewing why an export could not be completed.\n"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Filter Data",
+      "item": [
+        {
+          "name": "POST /v2/filter-data",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v2/filter-data",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v2",
+                "filter-data"
+              ],
+              "query": [
+                {
+                  "key": "page_size",
+                  "value": "",
+                  "disabled": true,
+                  "description": "Maximum properties returned in this page. Defaults to the configured page size and cannot exceed the configured maximum."
+                },
+                {
+                  "key": "page_token",
+                  "value": "",
+                  "disabled": true,
+                  "description": "Opaque pagination token returned as data.next_page_token. Omit for the first page."
+                }
+              ]
+            },
+            "description": "Filter\n\nFilter properties with explicit FIPS, geometry, and filter inputs. The request\nmust include at least one location constraint. Bounding-box geometry is applied\nwhen no FIPS list is supplied; polygon geometry can be combined with FIPS. Quota\nis checked before the request and decremented only when the result count is\ngreater than zero. Returns `403` when the account's `filter_data_limit` quota\nis exhausted.\n\nFilter request keys must come from `GET /v2/filter-data/filters`. Response rows\nare a smaller result shape and include `property_id`, `apn`, `fips`,\n`street_address`, `owner_full_name`, and `lot_size_acres`. Address filtering can\nuse supported keys such as `situsfullstreetaddress`, `situsstreet`,\n`situshousenbr`, `situscity`, and `situszip5`.\n\n## Reuse a saved filter\n\nEvery valid body-only request creates or reuses an equivalent immutable filter\ndefinition. The response returns its owner-scoped `data.filter_id`, the only\nsaved-filter value exposed by the public API. To run those same conditions\nagain, send only that `filter_id` in the request body as the authenticated\naccount that received it; pagination parameters may still be supplied.\n\nThere are exactly two valid request-body shapes:\n\nReplay a saved filter:\n\n```json\n{\"filter_id\":\"6b8e7827-1ab7-444e-b2c5-4a169f248d82\"}\n```\n\nCreate or reuse a definition:\n\n```json\n{\"fips\":[\"48113\"]}\n```\n\n`filter_id` is a body field, not a query parameter. Do not combine it with\ndefinition fields. An equivalent definition reuses its existing identifier;\ndifferent conditions require a body without `filter_id`.\n\nA request that combines `filter_id` with `name`, `fips`, `geometry`, `filters`,\n`duplicates`, or `empty_mailing_addresses` is rejected with `400`. The endpoint\nnever updates a referenced filter or substitutes a different identifier.\n`name` is an optional label for a definition request; for an equivalent\nexisting filter, it can fill an empty label but never replaces an existing one.\n\n**Platform integrations:** `filter_id` identifies a persisted filter\ndefinition scoped to the authenticated account, not an individual end user of\na client's platform. If one account submits requests on behalf of multiple end\nusers, identical filter definitions submitted through that account resolve to\nthe same `filter_id`. Applications that serve multiple end users through a\nsingle account must maintain their own mapping from `filter_id` to end user.\n\n## Editing and revision control\n\nThe public API does not return or accept a filter revision, and it has no saved\nfilter list, definition-read, update, or delete endpoint. Keep the original\nrequest body if your application may need to create a related query later.\nRevision-controlled editing is not part of the current contract; a future\nfilter-management API will document its own versioning and concurrency rules.\n\nIf this request returns `429` or `503`, wait the number of seconds in the\n`Retry-After` response header before retrying.\n\n## When to use\n\n- Filter properties matching structured criteria and a county or geometry constraint.\n- Count matching records before exporting or fetching detailed property data.\n- Page through returned properties with `page_size` and `page_token`; any result-set size is supported.\n\n## Pagination\n\nUse query parameters `page_size` and `page_token` with the POST request. The\nfirst request omits `page_token`; subsequent requests pass the prior response's\n`data.next_page_token`. `page_size` defaults to the configured page size\n(100 by default) and cannot exceed the configured maximum (100 by default).\n\n`count` is the total number of matching properties for the filter request.\n`properties` contains only the current page. `next_page_token` is an opaque\ncursor and is an empty string when there are no more pages. For ordinary\nnon-deduplicated results, the server uses the last Elasticsearch sort values in\nthat cursor (`search_after`) and reuses the first page's count; later pages do\nnot repeat a deep `from/offset` query or a total-hit count. Clients must treat\nthe token as opaque and must not construct or modify it.\n\n## MLS filters\n\nMLS filters require MLS data access. When MLS access is not available, MLS filters are silently skipped and reported in `meta.rejected_filters` — the request continues with the remaining filters.\n\nThe `mls_for_sale` and `mls_sold` filters use `operator: \"mls_condition\"`. Omitting `days` or setting it to `0` matches all listings of that status regardless of date.\n\nThe `mls_propertytype` filter accepts a string or array of property type codes. Use `GET /v2/filter-data/filters/mls_propertytype/values` to retrieve the supported codes and labels.\n\nThe `listing_sold_toggle` filter accepts an optional `days` window. Setting `days: 9999` matches all sold listings regardless of date.\n\n## Polygon and bounding box filters\n\n`polygon` and `bbox` can be submitted as standard filters within the `filters` array alongside all other filters. See the request body examples (`bbox_filter`, `single_polygon_filter`, `multi_polygon_filter`) for complete request structures.\n\n**Coordinate format:** each coordinate pair is written as `longitude latitude` (longitude first, latitude second), separated by a space. Multiple pairs are separated by commas.\n\n| Filter key | `value` format | Notes |\n|---|---|---|\n| `bbox` | String with exactly 2 `lon lat` pairs | Any two opposite corners; order does not matter; normalization is automatic. Only applied when `fips` is absent. |\n| `polygon` (single) | String of comma-separated `lon lat` pairs forming a closed ring | First and last pair must match. Minimum 4 pairs (3 distinct vertices + closing point). Can be combined with `fips`. |\n| `polygon` (multi) | Array of closed-ring strings | Each string follows the same format as a single polygon. Properties within any ring are matched. |\n\nThe legacy `geometry` object form is still accepted and merges with any polygon or bbox filters submitted in the `filters` array.\n\n## Deduplication\n\n`duplicates` and `empty_mailing_addresses` are top-level request body parameters placed alongside `filters` (not inside it).\n\nBoth parameters accept native booleans, strings (`\"true\"`/`\"false\"`), or numerics (`1`/`0`).\n\n**Interaction between the two parameters:**\n\nWhen `duplicates` is `false` and `empty_mailing_addresses` is `true` (default), properties with an empty or missing mailing address are each returned as a unique entry rather than being collapsed together.\n\nWhen both are `false`, deduplication runs first and empty-mailing properties are excluded entirely.\n\nThe response contains the already-cleaned result set. No before/after counts or removal statistics are included. When `duplicates` is `false`, the `count` field reflects the post-deduplication total, not the raw index count.\n\nThe exact mode that keeps empty mailing addresses and selects the largest lot\nfor each non-empty mailing address pages normally like any other result set —\nthere is no result-set size limit. Very deep pagination into this mode can\nreach a hard ceiling in the search backend; if that happens the response\nexplains that you've reached the maximum depth and suggests exporting the\nsaved filter instead to get the full set.\n",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"duplicates\": false,\n  \"empty_mailing_addresses\": false,\n  \"filter_id\": \"\",\n  \"filters\": \"\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "GET /v2/filter-data/filters",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v2/filter-data/filters",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v2",
+                "filter-data",
+                "filters"
+              ],
+              "query": []
+            },
+            "description": "Filters list\n\nList the filters that can be used with property filtering. The response is grouped for UI clients and includes the supported operator, value source, multiple-value support, and an example filter object for each field.\n\n## When to use\n\n- Build a filter UI or validate user-configurable filter forms before calling `POST /v2/filter-data`.\n- Refresh client-side filter metadata when adding support for new filters.\n\n## MLS filters\n\nMLS filters are listed in the **MLS** group and require MLS data access. If your account does not have MLS access, any MLS filters submitted with a filter request are skipped and reported in `meta.rejected_filters` rather than blocking the request.\n\nMLS filter types:\n\n| Type | Operator | Description |\n|---|---|---|\n| `mls_condition` | `mls_condition` | Matches active or sold MLS listings, with an optional `days` window. |\n| `active_listing_toggle` | `active_listing_toggle` | Includes or excludes active MLS listings from results. |\n| `listing_sold_toggle` | `listing_sold_toggle` | Includes or excludes sold MLS listings, with an optional `days` window. |\n\nUse `GET /v2/filter-data/filters/mls_propertytype/values` to retrieve the supported MLS property type codes and labels.\n\nDictionary-backed condition filters such as `vacantflag` (Vacant Structures) expose single-letter codes (for example `V` for ThirdParty-Vacancy). Use `GET /v2/filter-data/filters/vacantflag/values` to retrieve the full code list.\n"
+          },
+          "response": []
+        },
+        {
+          "name": "GET /v2/filter-data/filters/{filter_key}/values",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v2/filter-data/filters/{{filter_key}}/values",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v2",
+                "filter-data",
+                "filters",
+                "{{filter_key}}",
+                "values"
+              ],
+              "query": [
+                {
+                  "key": "fips",
+                  "value": "",
+                  "disabled": true,
+                  "description": "Optional 5-digit county FIPS values used by county-backed filters."
+                }
+              ]
+            },
+            "description": "List filter values\n\nReturn selectable values for one property filter. County-backed filters use the supplied `fips` query parameters to return values available in those counties.\n\nThe `filter_key` path parameter is restricted to filters that expose selectable values; keys without enumerable values are rejected. The response `type` mirrors the `values_source` field from `GET /v2/filter-data/filters`:\n\n- `dictionary` — fixed code→label values bundled with the platform (for example `owneroccupied`, `vacantflag`, `landusecode`, or the full county list under `fips`). `fips` must be omitted for these filters; supplying it returns `400 Bad Request`.\n- `county` — values available in the supplied counties, sourced from the county dataset. `fips` is required for these filters; omitting it returns `400 Bad Request`.\n\n## When to use\n\n- Populate dropdowns for filters that declare `values_source` in `GET /v2/filter-data/filters`.\n- Load county-specific values after the caller has selected one or more FIPS codes.\n"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Properties",
+      "item": [
+        {
+          "name": "GET /v2/properties",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v2/properties",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v2",
+                "properties"
+              ],
+              "query": [
+                {
+                  "key": "owner",
+                  "value": "",
+                  "disabled": true,
+                  "description": "Owner name to search for. Minimum 2 characters."
+                },
+                {
+                  "key": "parcelnumb",
+                  "value": "",
+                  "disabled": true,
+                  "description": "Parcel number / APN to search for. Minimum 2 characters."
+                },
+                {
+                  "key": "address",
+                  "value": "",
+                  "disabled": true,
+                  "description": "Free-text street address to search for, e.g. \"123 Main St, Los Angeles, CA 90012\". Minimum 2 characters."
+                },
+                {
+                  "key": "city",
+                  "value": "",
+                  "disabled": true,
+                  "description": "Narrows results to a city."
+                },
+                {
+                  "key": "zip",
+                  "value": "",
+                  "disabled": true,
+                  "description": "Narrows results to a 5-digit ZIP code."
+                },
+                {
+                  "key": "fips",
+                  "value": "",
+                  "disabled": true,
+                  "description": "5-digit FIPS county code. Narrows results to one county."
+                },
+                {
+                  "key": "state",
+                  "value": "",
+                  "disabled": true,
+                  "description": "2-letter state abbreviation. Ignored when fips is set."
+                }
+              ]
+            },
+            "description": "List properties\n\nSearch for properties by owner name, parcel/APN number, or street address. Returns up to **10** best-matching results, ranked by relevance. This limit is fixed and cannot be raised — use `POST /v2/filter-data` for bulk or paginated retrieval. The `search_limit` daily quota is decremented only when the response contains at least one result — empty searches are free. Exhausting the `search_limit` quota returns `403`, not `429`.\n\nThe response `data` is a GeoJSON [`FeatureCollection`](https://geojson.org): `data.features` holds one `Feature` per match. Each `Feature` carries the property identifier, address fields, and owner name inside its `properties` object, and its location in `geometry` as a `Point` (`[longitude, latitude]`); `geometry` is `null` when no location is known. The collection stays under the standard `data` envelope alongside `meta.requests_left`.\n\nSupply one or more of these search parameters:\n\n- `owner` — owner name (minimum 2 characters).\n- `parcelnumb` — parcel number / APN (minimum 2 characters).\n- `address` — free-text street address such as `123 Main St, Los Angeles, CA 90012` (minimum 2 characters). Matching tolerates minor typos and accepts partial addresses.\n\nNarrow the results with these optional filters: `city`, `zip`, `fips` (5-digit county code), and `state` (2-letter abbreviation; ignored when `fips` is set).\n\nAt least one search parameter or filter is required. When several are supplied they are combined: a result must match **all** of them, so adding parameters narrows the result set (e.g. `owner` + `address` finds a specific owner at a specific address).\n\n## When to use\n\n- Autocomplete / typeahead UI: user types an owner name, parcel number, or address to locate a property.\n- Finding a property by its street address, optionally narrowed to a city, ZIP, county, or state.\n- Resolving a known owner, APN, or address to a `property_id` before calling `GET /v2/properties/{property_id}`.\n- Do not use for bulk or filter-based retrieval — use `POST /v2/filter-data` for that instead.\n"
+          },
+          "response": []
+        },
+        {
+          "name": "GET /v2/properties/point",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v2/properties/point",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v2",
+                "properties",
+                "point"
+              ],
+              "query": [
+                {
+                  "key": "latitude",
+                  "value": "",
+                  "disabled": false,
+                  "description": "WGS 84 latitude of the target point."
+                },
+                {
+                  "key": "longitude",
+                  "value": "",
+                  "disabled": false,
+                  "description": "WGS 84 longitude of the target point."
+                }
+              ]
+            },
+            "description": "Retrieve property by point\n\nFetch a single property record by geographic coordinates. Supply `latitude` and `longitude` query parameters identifying a point; the platform resolves the parcel that contains that point and returns full property data.\n\nThe response `data` is a strict GeoJSON [`Feature`](https://geojson.org): its root holds only `type`, `geometry`, `bbox`, and `properties`. All property attributes enabled for your account live inside `properties`. Each successful call decrements your daily `single_property_limit` quota. Once that daily quota reaches zero, successful calls consume your subscription export row balance instead.\n\n`meta.requests_left` reports the combined total of remaining requests: your remaining daily quota plus available export tokens. Once the daily quota is exhausted it reflects only the remaining export token balance.\n\nTemporary contention while updating the account balance may return `503`; retry\nthe request after the interval in `Retry-After`. A genuinely exhausted quota\nreturns `403`.\n\nProperty fields use the platform's normalized `snake_case` vocabulary. Dates are returned as `YYYY-MM-DD`.\n\n## When to use\n\n- Retrieving property data from a map click or GPS coordinate.\n- Identifying the parcel at a known location without a prior property-list lookup.\n- Do not use for bulk retrieval — repeated calls consume your daily quota one record at a time.\n\nIf no parcel can be resolved for the supplied coordinates, the endpoint returns\n`404 Not Found` with message `No property found at the specified location.`\n"
+          },
+          "response": []
+        },
+        {
+          "name": "GET /v2/properties/{property_id}",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v2/properties/{{property_id}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v2",
+                "properties",
+                "{{property_id}}"
+              ],
+              "query": [
+                {
+                  "key": "fips",
+                  "value": "",
+                  "disabled": true,
+                  "description": "5-digit county FIPS code. When omitted, the FIPS is resolved automatically from the property index."
+                }
+              ]
+            },
+            "description": "Retrieve a property\n\nFetch a single property record by property ID. The response `data` is a strict GeoJSON [`Feature`](https://geojson.org): its root holds only `type`, `geometry`, `bbox`, and `properties`. All property attributes enabled for your account live inside `properties`. Each successful call decrements your daily `single_property_limit` quota. Once that daily quota reaches zero, successful calls consume your subscription export row balance instead.\n\n`meta.requests_left` reports the combined total of remaining requests: your remaining daily quota plus available export tokens. Once the daily quota is exhausted it reflects only the remaining export token balance.\n\nTemporary contention while updating the account balance may return `503`; retry\nthe request after the interval in `Retry-After`. A genuinely exhausted quota\nreturns `403`.\n\nProperty fields use the platform's normalized `snake_case` vocabulary. Dates are returned as `YYYY-MM-DD`.\n\nThe `fips` query parameter is optional. When omitted, the county FIPS code is resolved automatically from the property index.\n\n## When to use\n\n- Retrieving detailed property data after discovering a property ID through `GET /v2/properties`.\n- Enriching a known parcel with geometry, bbox, and the full set of property fields enabled for your account.\n- Do not use for bulk retrieval — repeated calls consume your daily quota one record at a time.\n"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Comp Reports",
+      "item": [
+        {
+          "name": "GET /v2/reports/comps",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v2/reports/comps",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v2",
+                "reports",
+                "comps"
+              ],
+              "query": [
+                {
+                  "key": "date",
+                  "value": "",
+                  "disabled": true,
+                  "description": "Filter by generation date (YYYY-MM-DD, UTC)."
+                },
+                {
+                  "key": "property_id",
+                  "value": "",
+                  "disabled": true,
+                  "description": "Filter by property identifier; 0 means no filter."
+                },
+                {
+                  "key": "status",
+                  "value": "",
+                  "disabled": true,
+                  "description": "Filter by report status."
+                },
+                {
+                  "key": "page_size",
+                  "value": "",
+                  "disabled": true,
+                  "description": "Maximum reports to return (1–50)."
+                },
+                {
+                  "key": "page_token",
+                  "value": "",
+                  "disabled": true,
+                  "description": "Opaque cursor from a prior response."
+                }
+              ]
+            },
+            "description": "List comp reports\n\nList all **Comparable Sales Reports** (comp reports) for the authenticated user, ordered by creation time descending. Supports optional filters and cursor-based pagination.\n\n## Filters\n\n| Parameter | Description |\n|-----------|-------------|\n| `date` | ISO 8601 date (YYYY-MM-DD, UTC) — filter reports created on that calendar day |\n| `property_id` | Return only reports for the specified property |\n| `status` | One of `queued`, `processing`, `completed`, `failed` |\n\nFilters may be combined. Use `page_size` (1–50, default 50) and `page_token` to page through results. Pass the `next_page_token` from a response as `page_token` on the next request; an empty `next_page_token` means no further pages.\n\n## When to use\n\n- Checking the status of pending reports without knowing the `report_id`.\n- Listing all completed reports for a property before deciding whether to generate a new one.\n"
+          },
+          "response": []
+        },
+        {
+          "name": "POST /v2/reports/comps",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v2/reports/comps",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v2",
+                "reports",
+                "comps"
+              ],
+              "query": []
+            },
+            "description": "Create a comp report\n\nQueue generation of a **Comparable Sales Report** (comp report) for a property. Returns immediately with a `report_id` (UUID); the report is generated asynchronously. The account's daily comp report quota is decremented at creation time.\n\nSubmit the property identifier as `property_id`. Poll status with `GET /v2/reports/comps` or fetch the result with `GET /v2/reports/comps/{report_id}` once `status` is `completed`.\n\nIf a report for the same `property_id` is already queued or processing, this endpoint returns that existing report instead of creating a new one, and does not deduct another quota unit — safe to retry after a timeout without double-billing.\n\n## When to use\n\n- Requesting a fresh comp report for a property.\n- Check `GET /v2/reports/comps?property_id={id}&status=completed` first — avoid consuming quota when a recent completed report already exists.\n",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"property_id\": 0\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "GET /v2/reports/comps/{report_id}",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v2/reports/comps/{{report_id}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v2",
+                "reports",
+                "comps",
+                "{{report_id}}"
+              ],
+              "query": []
+            },
+            "description": "Retrieve a comp report\n\nFetch the generated data for a **Comparable Sales Report** (comp report) by its `report_id`. Returns subject-property details, estimated valuation, comparable parcels, and PDF rendering assets when the report is complete; returns a not-found error when the report data has not yet materialized — this occurs while the report is still queued or processing.\n\nThe `report_id` is the UUID returned by `POST /v2/reports/comps`. No quota is consumed for fetching an existing report.\n\nComparable parcels include wetlands coverage and slope-under-10% fields required for PDF parity with the web application.\n\n## When to use\n\n- Retrieving the data for a previously requested report once it shows `completed` in `GET /v2/reports/comps`.\n- Check `GET /v2/reports/comps` first to confirm status before fetching.\n"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Skip Trace",
+      "item": [
+        {
+          "name": "GET /v2/skip-traces",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v2/skip-traces",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v2",
+                "skip-traces"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "",
+                  "disabled": true,
+                  "description": "Page number (1-based)."
+                },
+                {
+                  "key": "page_size",
+                  "value": "",
+                  "disabled": true,
+                  "description": "Skip traces per page."
+                }
+              ]
+            },
+            "description": "List skip traces\n\nReturns a page of bulk skip traces created by your account, newest first. Use this endpoint to show current and historical skip-trace jobs with status, progress, test-mode state, and any available output download URLs (CSV and XLSX).\n\nEach item's records are broken down into `success_rows` (at least one matched phone), `no_match_rows` (processed with no matched phone data), and `failed_rows` (lookup ended in an error).\n\nPagination uses `page` and `page_size`; `page_size` is capped at 100.\n\n## When to use\n\nTypical uses:\n\n- Showing a user's skip-trace history.\n- Refreshing status for multiple active skip traces in one request.\n- Finding completed skip traces that have downloadable output.\n"
+          },
+          "response": []
+        },
+        {
+          "name": "POST /v2/skip-traces",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v2/skip-traces",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v2",
+                "skip-traces"
+              ],
+              "query": []
+            },
+            "description": "Create a skip trace\n\nStart a new bulk skip trace from one of two input sources: a CSV file (`input_file`) or an inline array of records (`json_data`). At least one is required; omitting both returns `400`. If both are supplied, `json_data` is used and `input_file` is ignored. A single request is limited to **50,000 rows**; submitting more returns `400`. Bulk skip-trace tokens are deducted for every submitted row at creation; every row without a successful match is refunded when the task completes, stops, or fails. Returns `403` when the record count exceeds the account's available token balance. Returns `400` when the `input_file` URL cannot be downloaded or the downloaded file is not valid CSV.\n\n`fields` maps semantic column keys (`first_name`, `last_name`, `mailing_address`, `mailing_city`, `mailing_state`, `mailing_zip`, `property_address`, `property_city`, `property_state`, `property_zip`) to a column identifier in your input. `fields.first_name` and `fields.last_name` are optional — omit them or set them to `null` when your records do not include owner name columns. `fields.mailing_city`, `fields.mailing_state`, and `fields.mailing_zip` are always required; a request that omits any of them, or maps one to an empty value, returns `400`.\n\nFor `json_data`, every other non-empty value in `fields` must exactly match a `json_data` property name, including letter case. For `input_file` (CSV), every other non-empty value in `fields` is instead the CSV column's 0-based position as a string (e.g. `\"0\"` for the first column). The output preserves the CSV header labels, including duplicate labels, but labels never control mapping. `has_header: true` always skips the first CSV row and preserves it as the output header. With `has_header: false`, the parser performs only a conservative auto-detect: it skips the first row when at least two cells match common owner/address labels; otherwise the first row is treated as data and output columns are named by position. A mismatch (a mapped property name not found in `json_data`, or a column position out of range for `input_file`) returns `400` with per-field details such as `fields.mailing_address`.\n\n## Preserving custom values with `custom_field_1`–`3`\n\n`fields` also accepts up to three preservation-only mappings: `custom_field_1`, `custom_field_2`, and `custom_field_3`. Use them to carry values through the skip trace without affecting matching, searching, or the enrichment result — for example an `APN`, a `property_id`, an internal record ID, a list name, or any other reference value you need to reconcile output rows with your original records.\n\nMapping rules mirror the other `fields` entries:\n\n- For `json_data`, each `fields.custom_field_*` value must exactly match a property name in your `json_data` objects.\n- For `input_file`, each `fields.custom_field_*` value must be the corresponding CSV column's 0-based position as a string.\n\nEach mapped value is copied unchanged into the matching `custom_field_1`, `custom_field_2`, or `custom_field_3` output column — one column per mapping you provide. A request that maps a fourth custom field (or beyond) returns `400`. An invalid mapping — a property name not found in `json_data`, or a column position out of range for `input_file` — returns `400` with per-field details such as `fields.custom_field_1`, the same as any other `fields` entry.\n\nFor example, to preserve an APN and a property ID alongside mailing-address fields in `json_data`:\n\n```json\n{\n  \"fields\": {\n    \"mailing_address\": \"mailing_address\",\n    \"mailing_city\": \"mailing_city\",\n    \"mailing_state\": \"mailing_state\",\n    \"mailing_zip\": \"mailing_zip\",\n    \"custom_field_1\": \"apn\",\n    \"custom_field_2\": \"property_id\"\n  },\n  \"json_data\": [\n    {\n      \"mailing_address\": \"456 Oak Ave\",\n      \"mailing_city\": \"Dallas\",\n      \"mailing_state\": \"TX\",\n      \"mailing_zip\": \"75201\",\n      \"apn\": \"123-456-789\",\n      \"property_id\": \"37418027\"\n    }\n  ]\n}\n```\n\nThe output row preserves those values unchanged: `custom_field_1` is `123-456-789` and `custom_field_2` is `37418027`.\n\nFor `input_file`, map each custom field to its CSV column position instead, e.g. `\"custom_field_1\": \"12\"` to preserve the 13th column (APN) and `\"custom_field_2\": \"13\"` to preserve the 14th column (property ID).\n\nSet `test_mode: true` in the POST request to run the whole skip trace against simulated data without sending requests to external data providers or consuming tokens. A test-mode skip trace stays in test mode across pause/resume.\n\nTest-mode bulk tasks can make the outcome mix deterministic for integration and lifecycle testing. Set `test_mode_success_rows` or `test_mode_failure_rows` for exact counts, or use `test_mode_success_ratio` / `test_mode_failure_ratio` with values from `0` to `1`. Exact counts take precedence over ratios. When omitted, all rows succeed unless the server-configured default failure ratio is set. Simulated failures follow the standard lifecycle and remain in the result file alongside successful rows, but with empty result columns instead of matched data; they do not send requests to external data providers or consume tokens.\n\n## Creating from a data array\n\nUse the **Inline JSON data** example to submit records inline instead of hosting a file. `has_header` is not applicable to `json_data` — every entry in the array is treated as a data row, never a header. `fields` maps each semantic column key to the matching key name used in your `json_data` objects; the example includes owner, mailing-address, and property-address data. The **Inline rows keyed by property address** example shows the same property fields with the owner-name fields omitted.\n\n## Creating from a file\n\nUse the **CSV file** example to submit a CSV hosted at a shareable URL instead of inline records. `input_file` must be a publicly downloadable link (e.g. an S3, shared Google Drive, or Dropbox URL), not an authenticated or expiring one. `has_header` controls explicit header handling as described above; either way, `fields` maps each semantic column key to the CSV column's 0-based position, never its header text. The example maps owner, mailing-address, and property-address columns from the supplied CSV, including `property_address: \"27\"`, `property_city: \"28\"`, `property_state: \"29\"`, and `property_zip: \"31\"`.\n\nThe **CSV file** request maps those columns by position in `fields` and also sets `test_mode: true`. The **CSV file with email lookup** example uses the same property-aware mapping but also sets `emails_trace: true` to return email matches alongside phone numbers.\n\n## When to use\n\n- Processing a list of property owners to retrieve phone numbers in bulk.\n- Poll status and retrieve the output CSV with `GET /v2/skip-traces/{skip_trace_id}`.\n- Set `test_mode: true` in the POST request while integrating, to exercise the full lifecycle (create, poll, pause/resume, output CSV) without sending requests to external data providers or consuming tokens.\n",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"fields\": {\n    \"mailing_city\": \"\",\n    \"mailing_state\": \"\",\n    \"mailing_zip\": \"\"\n  },\n  \"emails_trace\": false\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "POST /v2/skip-traces/lookups",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v2/skip-traces/lookups",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v2",
+                "skip-traces",
+                "lookups"
+              ],
+              "query": []
+            },
+            "description": "Create a lookup\n\nSynchronous single-person skip-trace lookup. Returns phone numbers with DNC (Do Not Call) status immediately. Deducts one skip-trace token from the account's balance up front; the same token balance used by `POST /v2/skip-traces`. Returns `403` if the account has no tokens left. Only a matched lookup is billable: the debited token is automatically refunded when the lookup completes with no matched phone number, the same way it is when the underlying vendor call fails. `dnc: true` indicates that the phone number matched one or more DNC sources. Check `dnc_types` for the returned DNC category.\n\nAll fields are optional, but more of them improve match accuracy. The **Name and address** example combines a name and mailing address; **Address only** shows the minimal address-only shape.\n\nSet `test_mode: true` in the POST request to run the lookup against simulated data without consuming a token. The resulting lookup can later be retrieved using the returned `skip_trace_id`. The GET endpoint only retrieves an existing lookup result.\n\n## When to use\n\n- Looking up contact information for a single property owner by name.\n- Real-time enrichment where waiting for a bulk skip trace is not practical.\n- For batch processing of multiple records, use `POST /v2/skip-traces` instead.\n- Set `test_mode: true` in the POST request while integrating, to validate your request/response handling without sending requests to external data providers or consuming a token.\n",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"address\": \"\",\n  \"city\": \"\",\n  \"first\": \"\",\n  \"last\": \"\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "GET /v2/skip-traces/lookups/{skip_trace_id}",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v2/skip-traces/lookups/{{skip_trace_id}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v2",
+                "skip-traces",
+                "lookups",
+                "{{skip_trace_id}}"
+              ],
+              "query": []
+            },
+            "description": "Retrieve a lookup\n\nRetrieve a previously run single-person lookup by its `skip_trace_id`, including the phone numbers and DNC status it returned at the time. This endpoint only retrieves an existing lookup result; `test_mode` is sent only in the POST request. You may only retrieve lookups you created.\n\n## When to use\n\n- Confirming what a past single lookup returned, for support or reconciliation.\n- Re-fetching a result after losing the original response, using the id it returned.\n"
+          },
+          "response": []
+        },
+        {
+          "name": "DELETE /v2/skip-traces/{skip_trace_id}",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v2/skip-traces/{{skip_trace_id}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v2",
+                "skip-traces",
+                "{{skip_trace_id}}"
+              ],
+              "query": []
+            },
+            "description": "Delete a skip trace\n\nPermanently delete a bulk skip-trace record and its associated output file. You may only delete skip traces you own. Available for skip traces in `paused`, `stopped`, `completed`, or `failed` status. Deleting does not refund any tokens by itself — settle refunds first with `POST /v2/skip-traces/{skip_trace_id}/stop` for a task that hasn't finished, since a `queued` or `processing` task cannot be deleted directly.\n\n## When to use\n\n- Cleaning up completed, stopped, or failed skip traces you no longer need.\n\n## 409 responses\n\nDeleting a `queued` or `processing` skip trace returns `409 Conflict`, since it must be stopped first:\n\n```json\n{\n  \"error\": {\n    \"code\": \"conflict\",\n    \"message\": \"Stop the skipTrace before deleting it.\"\n  }\n}\n```\n"
+          },
+          "response": []
+        },
+        {
+          "name": "GET /v2/skip-traces/{skip_trace_id}",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v2/skip-traces/{{skip_trace_id}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v2",
+                "skip-traces",
+                "{{skip_trace_id}}"
+              ],
+              "query": []
+            },
+            "description": "Retrieve a skip trace\n\nPoll the status and result of a bulk skip trace. Once at least one row has been processed, the response includes `download_url` (CSV) and `xlsx_download_url` (XLSX) — URLs to download the output file in either format. The output file always preserves every row from your input, in its original order: rows with a successful match carry the matched Skip Trace data, and no-match, failed, or not-yet-processed rows are preserved with empty result columns instead of being dropped. A paused or stopped skip trace may include the same links for its partial output; no output links are returned when no row has been processed yet. CSV headers are preserved from the input when available. The result file carries up to 6 phone groups per row, in priority order: `Phone` (the primary number) followed by `Alt Phone 1` through `Alt Phone 5`. `Phone` and `Alt Phone 1` each contribute `<label>`, `<label> (Line Type)`, `<label> (DNC)`, `<label> (DNC Litigator)`, `<label> (DNC Complainers)`, and `<label> (DNC Federal)` columns; `Alt Phone 2` through `Alt Phone 5` contribute only `<label>` and `<label> (Line Type)`. Each DNC cell renders its own column label (e.g. `DNC`, `DNC Litigator`) when the number matched that flag and is left empty otherwise. When the request set `emails_trace: true`, a single `Email` column (the primary matched email) follows `Phone (DNC)`. Your input columns follow the phone columns in their original order; an input column named like a result column (for example `Phone` or `Email`) is renamed with an `Input ` prefix. You may only retrieve skip traces you created.\n\n`success_rows` reports how many records had at least one matched phone — records processed with no match are not counted as successful. `no_match_rows` counts records processed with no matched phone data, and `failed_rows` counts records whose lookup ended in an error. Records not yet reflected in any of these three counts are still queued, processing, or paused/stopped without a durable outcome. These counts describe processing outcomes and billing only — they do not determine which rows appear in the output file, since the file always contains every input row regardless of outcome.\n\n## When to use\n\n- Checking whether a bulk skip trace you created is still running or has finished.\n- Retrieving the `download_url`/`xlsx_download_url` URLs once the skip trace completes.\n"
+          },
+          "response": []
+        },
+        {
+          "name": "POST /v2/skip-traces/{skip_trace_id}/pause",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v2/skip-traces/{{skip_trace_id}}/pause",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v2",
+                "skip-traces",
+                "{{skip_trace_id}}",
+                "pause"
+              ],
+              "query": []
+            },
+            "description": "Pause a skip trace\n\nTemporarily pause a running bulk skip trace. No tokens are refunded when pausing. Resume later with `POST /v2/skip-traces/{skip_trace_id}/resume`. A task that remains paused for 7 days is automatically moved to `stopped` by a background check; because that check runs periodically, the transition may occur approximately 7–8 days after the task was paused.\n\n## When to use\n\n- Temporarily suspending processing to manage token consumption.\n- Only skip traces in `processing` status can be paused — returns `409` otherwise.\n\n## 409 responses\n\nPausing a skip trace that is not in `processing` status returns `409 Conflict` with the `invalid_status_transition` code, for example:\n\n```json\n{\n  \"error\": {\n    \"code\": \"invalid_status_transition\",\n    \"message\": \"The skip trace is already paused.\"\n  }\n}\n```\n\n```json\n{\n  \"error\": {\n    \"code\": \"invalid_status_transition\",\n    \"message\": \"The skip trace cannot be paused because its current status is stopped.\"\n  }\n}\n```\n\n```json\n{\n  \"error\": {\n    \"code\": \"invalid_status_transition\",\n    \"message\": \"The skip trace cannot be paused because its current status is completed.\"\n  }\n}\n```\n"
+          },
+          "response": []
+        },
+        {
+          "name": "POST /v2/skip-traces/{skip_trace_id}/resume",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v2/skip-traces/{{skip_trace_id}}/resume",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v2",
+                "skip-traces",
+                "{{skip_trace_id}}",
+                "resume"
+              ],
+              "query": []
+            },
+            "description": "Resume a skip trace\n\nResume a previously paused bulk skip trace. Processing continues from where it left off. After a successful request, the returned status is `processing`.\n\n## When to use\n\n- Re-activating a skip trace after pausing with `POST /v2/skip-traces/{skip_trace_id}/pause`.\n- Only skip traces in `paused` status can be resumed — returns `409` otherwise.\n"
+          },
+          "response": []
+        },
+        {
+          "name": "POST /v2/skip-traces/{skip_trace_id}/stop",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v2/skip-traces/{{skip_trace_id}}/stop",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v2",
+                "skip-traces",
+                "{{skip_trace_id}}",
+                "stop"
+              ],
+              "query": []
+            },
+            "description": "Stop a skip trace\n\nPermanently stop a bulk skip trace. The account is charged only for successful matches; all other submitted rows are refunded, including unsuccessful rows that were already attempted and rows that were never attempted. If any row has been processed, a partial CSV/XLSX is generated and exposed through the task details, preserving every input row processed so far — successful rows carry matched data, and no-match, failed, or not-yet-processed rows are preserved with empty result columns. No file is generated when no row has been processed yet. A stopped skip trace cannot be resumed. A task may also be set to `stopped` automatically after it remains paused for 7 days; the background check may perform that transition approximately 7–8 days after the task was paused. After a successful request, the returned status is `stopped`.\n\n## When to use\n\n- Cancelling a skip trace you no longer need and reclaiming tokens for all non-successful rows.\n- Available for skip traces in `queued`, `processing`, or `paused` status. Repeating the request for an already-stopped task is idempotent: it returns `stopped` and retries any missing refund or partial output work. A completed task returns `409`.\n\n## 409 responses\n\nStopping a completed skip trace returns `409 Conflict` with the `invalid_status_transition` code:\n\n```json\n{\n  \"error\": {\n    \"code\": \"invalid_status_transition\",\n    \"message\": \"The skip trace cannot be stopped because its current status is completed.\"\n  }\n}\n```\n"
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}
