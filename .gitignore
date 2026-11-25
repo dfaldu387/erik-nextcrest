@@ -27,3 +27,6 @@ dist-ssr
 .env
 .env.*
 !.env.example
+
+# Markdown documentation is kept out of the repository
+*.md
