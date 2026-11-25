@@ -486,13 +486,135 @@ async function syncInboxMessages(client: Client, db: SupabaseClient, count: numb
   console.log(`\nMessages saved: ${stored}${failed ? `, ${failed} conversations could not be read` : ''}.`);
 }
 
+// A quick refresh that runs every few minutes until the webhook delivers events. It reads the newest N
+// conversations (newest first), saves their latest messages, updates each conversation's last message, and
+// syncs the Unread flag from the Unread folder. It does not rebuild the whole inbox.
+async function syncPoll(client: Client, db: SupabaseClient, count: number): Promise<void> {
+  const recent = await listAll(client, 'all', count);
+  const unread = await listAll(client, 'unread', 100);
+  const unreadIds = new Set(unread.map((u) => u.contactId));
+
+  let messages = 0;
+  let failed = 0;
+  for (const item of recent) {
+    try {
+      const history = await call<{ items: ThreadItem[] }>(client, 'read_conversation', { contactId: item.contactId, limit: 5 });
+      const rows = history.items.map((m) => toMessageRow(item.contactId, m)).filter((r): r is MessageRow => r !== null);
+      if (rows.length > 0) {
+        const { error } = await db.from('smartercontact_messages').upsert(rows, { onConflict: 'message_id' });
+        if (error) throw new Error(error.message);
+        messages += rows.length;
+      }
+      const details = toInboxDetails(history.items[0], [], new Map());
+      if (details.last_message_at) {
+        const { error } = await db
+          .from('smartercontact_conversations')
+          .update({ last_message: details.last_message, last_message_at: details.last_message_at, last_direction: details.last_direction, updated_at: new Date().toISOString() })
+          .eq('contact_id', item.contactId);
+        if (error) throw new Error(error.message);
+      }
+    } catch {
+      failed += 1;
+    }
+  }
+
+  // Unread flag: add it to conversations now in the Unread folder, and remove it from the rest.
+  const { data: flagged, error: flagError } = await db.from('smartercontact_conversations').select('contact_id,folders').contains('folders', ['unread']).limit(1000);
+  if (flagError) throw new Error(`Unread flag lookup failed: ${flagError.message}`);
+  const currentlyFlagged = new Set((flagged ?? []).map((r) => r.contact_id as string));
+  for (const id of unreadIds) {
+    if (currentlyFlagged.has(id)) continue;
+    const { data: row } = await db.from('smartercontact_conversations').select('folders').eq('contact_id', id).maybeSingle();
+    if (row) await db.from('smartercontact_conversations').update({ folders: [...new Set([...(row.folders as string[]), 'unread'])] }).eq('contact_id', id);
+  }
+  for (const row of flagged ?? []) {
+    const id = row.contact_id as string;
+    if (unreadIds.has(id)) continue;
+    const folders = ((row.folders as string[]) ?? []).filter((f) => f !== 'unread');
+    await db.from('smartercontact_conversations').update({ folders }).eq('contact_id', id);
+  }
+
+  console.log(`Poll: ${recent.length} conversations checked, ${messages} messages saved, ${unreadIds.size} unread${failed ? `, ${failed} could not be read` : ''}.`);
+}
+
+// Saves the newest messages of one conversation and updates its last message in the Inbox.
+async function refreshConversation(client: Client, db: SupabaseClient, contactId: string): Promise<void> {
+  const history = await call<{ items: ThreadItem[] }>(client, 'read_conversation', { contactId, limit: 5 });
+  const rows = history.items.map((m) => toMessageRow(contactId, m)).filter((r): r is MessageRow => r !== null);
+  if (rows.length > 0) {
+    const { error } = await db.from('smartercontact_messages').upsert(rows, { onConflict: 'message_id' });
+    if (error) throw new Error(error.message);
+  }
+  const details = toInboxDetails(history.items[0], [], new Map());
+  if (details.last_message_at) {
+    const { error } = await db
+      .from('smartercontact_conversations')
+      .update({ last_message: details.last_message, last_message_at: details.last_message_at, last_direction: details.last_direction, updated_at: new Date().toISOString() })
+      .eq('contact_id', contactId);
+    if (error) throw new Error(error.message);
+  }
+}
+
+// Sets the Unread flag on the conversations in the Unread folder and clears it from the rest.
+async function syncUnreadFlags(db: SupabaseClient, unreadIds: Set<string>): Promise<void> {
+  const { data: flagged, error } = await db.from('smartercontact_conversations').select('contact_id,folders').contains('folders', ['unread']).limit(1000);
+  if (error) throw new Error(`Unread flag lookup failed: ${error.message}`);
+  const currentlyFlagged = new Set((flagged ?? []).map((r) => r.contact_id as string));
+  for (const id of unreadIds) {
+    if (currentlyFlagged.has(id)) continue;
+    const { data: row } = await db.from('smartercontact_conversations').select('folders').eq('contact_id', id).maybeSingle();
+    if (row) await db.from('smartercontact_conversations').update({ folders: [...new Set([...((row.folders as string[]) ?? []), 'unread'])] }).eq('contact_id', id);
+  }
+  for (const row of flagged ?? []) {
+    const id = row.contact_id as string;
+    if (unreadIds.has(id)) continue;
+    await db.from('smartercontact_conversations').update({ folders: ((row.folders as string[]) ?? []).filter((f) => f !== 'unread') }).eq('contact_id', id);
+  }
+}
+
+// Near-instant refresh. Every interval it reads the newest conversations: a conversation that is new at the top,
+// or has moved up, has had activity, so its messages are read again. The Unread folder is checked each time too.
+// Runs until stopped. Each cycle costs two SmarterContact list calls plus one read per changed conversation.
+async function syncWatch(client: Client, db: SupabaseClient, intervalSeconds: number): Promise<void> {
+  let lastTop: string[] = [];
+  console.log(`Watching SmarterContact every ${intervalSeconds} seconds. Press Ctrl+C to stop.`);
+  for (;;) {
+    try {
+      const top = await call<{ items: ListedConversation[] }>(client, 'list_conversations', { category: 'all', limit: 10 });
+      const topIds = top.items.map((i) => i.contactId);
+      const changed = topIds.filter((id) => !lastTop.includes(id) || lastTop.indexOf(id) > topIds.indexOf(id));
+      for (const id of changed) {
+        try {
+          await refreshConversation(client, db, id);
+        } catch (error) {
+          console.log(`  could not refresh one conversation: ${error instanceof Error ? error.message : error}`);
+        }
+      }
+      if (changed.length > 0) console.log(`${new Date().toLocaleTimeString()} updated ${changed.length} conversation(s)`);
+      lastTop = topIds;
+
+      const unread = await call<{ items: ListedConversation[] }>(client, 'list_conversations', { category: 'unread', limit: 100 });
+      await syncUnreadFlags(db, new Set(unread.items.map((i) => i.contactId)));
+    } catch (error) {
+      console.log(`${new Date().toLocaleTimeString()} watch error, retrying: ${error instanceof Error ? error.message : error}`);
+      await pause(60_000);
+      continue;
+    }
+    await pause(intervalSeconds * 1000);
+  }
+}
+
 // ---------- entry point ----------
 
 function parseArgs(argv: string[]) {
   const limitArg = argv.find((a) => a.startsWith('--limit='));
   const detailsArg = argv.find((a) => a.startsWith('--inbox-details'));
   const messagesArg = argv.find((a) => a.startsWith('--inbox-messages'));
+  const pollArg = argv.find((a) => a.startsWith('--poll'));
+  const watchArg = argv.find((a) => a.startsWith('--watch'));
   return {
+    watch: watchArg ? Number(watchArg.split('=')[1] ?? 30) || 30 : null,
+    poll: pollArg ? Number(pollArg.split('=')[1] ?? 50) || 50 : null,
     inboxLabels: argv.find((a) => a.startsWith('--inbox-labels')) ? Number(argv.find((a) => a.startsWith('--inbox-labels'))!.split('=')[1] ?? 2000) || 2000 : null,
     apply: argv.includes('--apply'),
     fromCache: argv.includes('--from-cache'),
@@ -510,6 +632,24 @@ async function main(): Promise<void> {
   if (!url || !key) throw new Error('Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_SECRET_KEY) in .env.');
 
   mkdirSync(OUT_DIR, { recursive: true });
+
+  if (args.watch !== null) {
+    const db = createClient(url, key, { auth: { persistSession: false } });
+    const client = await connect();
+    await syncWatch(client, db, args.watch);
+    return;
+  }
+
+  if (args.poll !== null) {
+    const db = createClient(url, key, { auth: { persistSession: false } });
+    const client = await connect();
+    try {
+      await syncPoll(client, db, args.poll);
+    } finally {
+      await client.close();
+    }
+    return;
+  }
 
   if (args.inbox || args.inboxDetails !== null || args.inboxMessages !== null || args.inboxLabels !== null) {
     const db = createClient(url, key, { auth: { persistSession: false } });

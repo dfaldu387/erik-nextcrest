@@ -827,7 +827,7 @@ export async function deleteSavedFilter(id: string): Promise<void> {
 }
 
 // Recent activity, built from the records each screen already writes: property imports, exclusion exports,
-// SmarterContact history imports and campaigns. The newest eight are shown.
+// SmarterContact history imports and campaigns. The newest five are shown.
 export async function getActivity(): Promise<DataResult<ActivityEvent[]>> {
   const client = supabase;
   if (!client) return wrap([], 'none');
@@ -876,5 +876,5 @@ export async function getActivity(): Promise<DataResult<ActivityEvent[]>> {
     })),
   ];
   events.sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
-  return { data: events.slice(0, 8), source: 'supabase', fetchedAt: new Date().toISOString() };
+  return { data: events.slice(0, 5), source: 'supabase', fetchedAt: new Date().toISOString() };
 }
