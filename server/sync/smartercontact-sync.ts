@@ -555,8 +555,19 @@ async function refreshConversation(client: Client, db: SupabaseClient, contactId
   }
 }
 
+// Adds conversations from the live lists that are not in the Inbox table yet (for example, a contact who texted
+// today). Existing rows are left alone, so their details and labels are kept.
+async function addMissingConversations(db: SupabaseClient, lists: Partial<Record<InboxFolder, ListedConversation[]>>): Promise<void> {
+  const rows = mergeInboxFolders(lists).map((r) => ({ ...r, updated_at: new Date().toISOString() }));
+  if (rows.length === 0) return;
+  const { error } = await db.from('smartercontact_conversations').upsert(rows, { onConflict: 'contact_id', ignoreDuplicates: true });
+  if (error) throw new Error(`Adding new conversations failed: ${error.message}`);
+}
+
 // Sets the Unread flag on the conversations in the Unread folder and clears it from the rest.
-async function syncUnreadFlags(db: SupabaseClient, unreadIds: Set<string>): Promise<void> {
+async function syncUnreadFlags(db: SupabaseClient, unreadItems: ListedConversation[]): Promise<void> {
+  const unreadIds = new Set(unreadItems.map((i) => i.contactId));
+  await addMissingConversations(db, { all: unreadItems, unread: unreadItems });
   const { data: flagged, error } = await db.from('smartercontact_conversations').select('contact_id,folders').contains('folders', ['unread']).limit(1000);
   if (error) throw new Error(`Unread flag lookup failed: ${error.message}`);
   const currentlyFlagged = new Set((flagged ?? []).map((r) => r.contact_id as string));
@@ -581,6 +592,7 @@ async function syncWatch(client: Client, db: SupabaseClient, intervalSeconds: nu
   for (;;) {
     try {
       const top = await call<{ items: ListedConversation[] }>(client, 'list_conversations', { category: 'all', limit: 10 });
+      await addMissingConversations(db, { all: top.items });
       const topIds = top.items.map((i) => i.contactId);
       const changed = topIds.filter((id) => !lastTop.includes(id) || lastTop.indexOf(id) > topIds.indexOf(id));
       for (const id of changed) {
@@ -594,7 +606,7 @@ async function syncWatch(client: Client, db: SupabaseClient, intervalSeconds: nu
       lastTop = topIds;
 
       const unread = await call<{ items: ListedConversation[] }>(client, 'list_conversations', { category: 'unread', limit: 100 });
-      await syncUnreadFlags(db, new Set(unread.items.map((i) => i.contactId)));
+      await syncUnreadFlags(db, unread.items);
     } catch (error) {
       console.log(`${new Date().toLocaleTimeString()} watch error, retrying: ${error instanceof Error ? error.message : error}`);
       await pause(60_000);
