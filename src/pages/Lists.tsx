@@ -6,8 +6,9 @@ import { SearchableSelect } from '@/components/ui/SearchableSelect';
 import { SearchableMultiSelect } from '@/components/ui/SearchableMultiSelect';
 import { normalizeZip } from '@/lib/zip';
 import { CardSkeleton, ErrorState } from '@/components/ui/States';
-import { useRecordsQuery } from '@/hooks/useNextCrestData';
+import { useRecordsQuery, useSuppressedPhonesQuery } from '@/hooks/useNextCrestData';
 import { EXCLUSION_REASONS, SMARTERCONTACT_HEADERS, planCampaignExport, toSmarterContactRow } from '@/lib/campaignExport';
+import { freshExportPlan } from '@/lib/exportOptOuts';
 import { downloadCsv, toCsv } from '@/lib/csv';
 import { applyListFilters, emptyFilters } from '@/lib/listFilters';
 import type { ListFilters } from '@/lib/listFilters';
@@ -46,7 +47,8 @@ export function Lists() {
     [records, filters.state, filters.county],
   );
   const matches = useMemo(() => applyListFilters(records, filters), [records, filters]);
-  const plan = useMemo(() => planCampaignExport(matches), [matches]);
+  const suppressed = useSuppressedPhonesQuery();
+  const plan = useMemo(() => planCampaignExport(matches, suppressed.data), [matches, suppressed.data]);
 
   const update = <K extends keyof ListFilters>(key: K, value: ListFilters[K]) =>
     setFilters((prev) => ({ ...prev, [key]: value, ...(key === 'state' ? { county: '' } : {}) }));
@@ -73,10 +75,21 @@ export function Lists() {
     saveSavedLists(next);
   };
 
-  const exportCsv = () => {
+  const [checkingOptOuts, setCheckingOptOuts] = useState(false);
+  const [exportNote, setExportNote] = useState<string | null>(null);
+  const exportCsv = async () => {
+    setCheckingOptOuts(true);
+    setExportNote(null);
+    const fresh = await freshExportPlan(matches);
+    setCheckingOptOuts(false);
+    if (!fresh.ok) {
+      setExportNote(fresh.message);
+      return;
+    }
     const stamp = new Date().toISOString().slice(0, 10);
     const scope = filters.county || filters.state || 'All';
-    downloadCsv(`SmarterContact_${scope}_${stamp}.csv`, toCsv(SMARTERCONTACT_HEADERS, plan.included.map(toSmarterContactRow)));
+    downloadCsv(`SmarterContact_${scope}_${stamp}.csv`, toCsv(SMARTERCONTACT_HEADERS, fresh.plan.included.map(toSmarterContactRow)));
+    setExportNote(`Opt-out list checked at ${new Date(fresh.checkedAt).toLocaleTimeString()}. ${fresh.plan.included.length.toLocaleString('en-US')} records exported.`);
   };
 
   if (isPending) {
@@ -189,7 +202,12 @@ export function Lists() {
               ))}
             </ul>
           </div>
-          <button type="button" className="btn-primary w-full" onClick={exportCsv} disabled={plan.included.length === 0}>
+          {exportNote && (
+            <p role="status" className="text-xs text-muted-foreground">
+              {exportNote}
+            </p>
+          )}
+          <button type="button" className="btn-primary w-full" onClick={exportCsv} disabled={checkingOptOuts || suppressed.isPending || suppressed.isError || plan.included.length === 0}>
             <Download size={16} aria-hidden="true" /> Export {formatCount(plan.included.length)} records
           </button>
         </section>

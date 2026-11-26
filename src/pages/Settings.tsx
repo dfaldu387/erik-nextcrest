@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import type { FormEvent, ReactNode } from 'react';
 import { PageHeader } from '@/components/ui/PageHeader';
+import { ScAccountsPanel } from '@/components/settings/ScAccountsPanel';
+import { FollowUpRulesPanel } from '@/components/settings/FollowUpRulesPanel';
 import { loadSettings, saveSettings, settingsSchema } from '@/lib/settings';
 import type { Settings as SettingsValues } from '@/lib/settings';
 
@@ -137,6 +139,10 @@ export function Settings() {
         </p>
         <p>Editable normalization rules and mapping templates need the database.</p>
       </section>
+
+      <FollowUpRulesPanel />
+
+      <ScAccountsPanel />
     </div>
   );
 }

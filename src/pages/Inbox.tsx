@@ -7,7 +7,7 @@ import { PageHeader } from '@/components/ui/PageHeader';
 import { EmptyState, ErrorState } from '@/components/ui/States';
 import { useInboxCountsQuery, useInboxFilterOptionsQuery, useInboxQuery } from '@/hooks/useNextCrestData';
 import { downloadCsv, toCsv } from '@/lib/csv';
-import { formatCount, formatDate } from '@/lib/format';
+import { formatCount, formatDate, formatTime } from '@/lib/format';
 import { EMPTY_INBOX_FILTERS, countActiveFilters, type InboxFilters } from '@/lib/inboxFilters';
 import {
   exportInbox,
@@ -177,7 +177,7 @@ export function Inbox() {
       sortValue: (r) => r.name,
       cell: (r) => (
         <div>
-          <div className="font-medium">{r.name || 'No name'}</div>
+          <div className="font-medium">{r.name || r.ownerName || 'No name'}</div>
           <div className="text-xs tabular-nums text-muted-foreground">{formatPhone(r.phone)}</div>
         </div>
       ),
@@ -198,7 +198,15 @@ export function Inbox() {
       header: 'Date',
       sortValue: (r) => r.lastMessageAt,
       className: 'whitespace-nowrap text-xs tabular-nums text-muted-foreground',
-      cell: (r) => (r.lastMessageAt ? formatDate(r.lastMessageAt) : '—'),
+      cell: (r) =>
+        r.lastMessageAt ? (
+          <span className="flex flex-col leading-tight">
+            <span>{formatDate(r.lastMessageAt)}</span>
+            <span className="text-[11px] text-muted-foreground/80">{formatTime(r.lastMessageAt)}</span>
+          </span>
+        ) : (
+          '—'
+        ),
     },
     {
       key: 'labels',
@@ -218,9 +226,21 @@ export function Inbox() {
       header: 'Property',
       cell: (r) =>
         r.propertyId ? (
-          <Link to={`/properties/${r.propertyId}`} className="text-primary hover:underline" onClick={(e) => e.stopPropagation()}>
-            Open property
-          </Link>
+          <span className="flex flex-col gap-0.5">
+            <Link to={`/properties/${r.propertyId}`} className="text-primary hover:underline" onClick={(e) => e.stopPropagation()}>
+              Open property
+            </Link>
+            {r.propertyCount > 1 && (
+              <Link
+                to={`/properties?q=${encodeURIComponent(r.ownerName || '')}`}
+                onClick={(e) => e.stopPropagation()}
+                className="w-fit whitespace-nowrap rounded-full bg-accent px-2 py-0.5 text-[11px] font-medium hover:underline"
+                title="Show all properties of this owner"
+              >
+                {r.propertyCount} properties
+              </Link>
+            )}
+          </span>
         ) : (
           <span className="text-muted-foreground">Not matched</span>
         ),
@@ -327,7 +347,7 @@ export function Inbox() {
             description={
               debouncedSearch || activeCount > 0
                 ? 'Try a different search, or clear a filter.'
-                : 'If this is the first time, run the inbox sync: npm run sync:smartercontact -- --inbox'
+                : 'Conversations appear here after the SmarterContact sync runs, which happens every minute.'
             }
           />
         ) : (

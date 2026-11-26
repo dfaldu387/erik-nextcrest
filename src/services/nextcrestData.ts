@@ -6,7 +6,9 @@ import {
   toLandRecord,
   toLandRecordFromSearch,
 } from '@/lib/propertyRecords';
-import { buildMarkets } from '@/lib/metrics';
+import { buildMarkets, marketLabel } from '@/lib/metrics';
+import { normalizePhone } from '@/lib/campaignExport';
+import { DEFAULT_FOLLOW_UP_RULES, getFollowUpRules, setFollowUpRules, type FollowUpRules } from '@/lib/followUp';
 import { chunk, type PropertyInsert } from '@/lib/importCommit';
 import type { PhoneLink } from '@/lib/phones';
 import type { SupabaseClient } from '@supabase/supabase-js';
@@ -42,6 +44,30 @@ async function fetchAllProperties(): Promise<PropertyRow[]> {
   return rows;
 }
 
+// One property, with the same fields the list uses. The property page reads this instead of the whole list.
+export async function getPropertyRecord(id: string): Promise<LandRecord | null> {
+  if (!supabase) return null;
+  const { data, error } = await supabase
+    .from('properties')
+    .select(
+      'id,internal_id,apn_raw,state,county,zip_code,acreage,owner_name,owner_type,marketing_status,total_contacts,last_contacted_at,first_acquired_at,created_at,property_owners(phone_numbers),property_phones(phone_numbers(phone_number))',
+    )
+    .eq('id', id)
+    .maybeSingle();
+  if (error) throw new Error(`Could not load the property: ${error.message}`);
+  return data ? toLandRecord(data as unknown as PropertyRow) : null;
+}
+
+// The county's market id and name, built in the database from the county's properties (migration 040).
+export async function getCountyMarket(state: string, county: string): Promise<{ id: string; name: string } | null> {
+  if (!supabase) return null;
+  const { data, error } = await supabase.rpc('property_county_summary', { p_state: state, p_county: county });
+  if (error) throw new Error(`Could not load the county: ${error.message}`);
+  const summary = data as { total: number; min_acres: number | null; max_acres: number | null; first_acquired: string | null } | null;
+  if (!summary || !summary.total || summary.min_acres === null || summary.max_acres === null || !summary.first_acquired) return null;
+  return marketLabel(state, county, Math.floor(summary.min_acres), Math.ceil(summary.max_acres), summary.first_acquired, Number(summary.total));
+}
+
 let recordsCache: Promise<LandRecord[]> | null = null;
 
 // Called when the signed-in user changes, so rows loaded for one user are not shown to another.
@@ -60,7 +86,38 @@ async function loadRecords(): Promise<LandRecord[]> {
   return recordsCache;
 }
 
+// The follow-up rules set on the Settings page (migration 036). Loaded before the records, so the statuses use them.
+export async function loadFollowUpRules(): Promise<FollowUpRules> {
+  if (!supabase) return getFollowUpRules();
+  try {
+    const { data, error } = await supabase.from('sc_follow_up_rules').select('quiet_days,max_contacts,rehit_days').eq('id', 1).maybeSingle();
+    if (error || !data) return getFollowUpRules();
+    const rules: FollowUpRules = { quietDays: data.quiet_days as number, maxContacts: data.max_contacts as number, rehitDays: data.rehit_days as number };
+    setFollowUpRules(rules);
+    return rules;
+  } catch {
+    return getFollowUpRules();
+  }
+}
+
+/** Saves new follow-up rules. Only an admin's change is saved (the database checks the role); anyone else gets a message. */
+export async function saveFollowUpRules(rules: FollowUpRules): Promise<{ ok: true } | { ok: false; message: string }> {
+  if (!supabase) return { ok: false, message: 'NextCrest is not connected to its database.' };
+  const { data, error } = await supabase
+    .from('sc_follow_up_rules')
+    .update({ quiet_days: rules.quietDays, max_contacts: rules.maxContacts, rehit_days: rules.rehitDays, updated_at: new Date().toISOString() })
+    .eq('id', 1)
+    .select('id');
+  if (error) return { ok: false, message: `The rules could not be saved: ${error.message}` };
+  if (!data || data.length === 0) return { ok: false, message: 'Only an admin can change the follow-up rules.' };
+  setFollowUpRules(rules);
+  return { ok: true };
+}
+
+export { DEFAULT_FOLLOW_UP_RULES };
+
 export async function getRecords(): Promise<DataResult<LandRecord[]>> {
+  await loadFollowUpRules();
   const records = await loadRecords();
   return wrap(records, supabase ? 'supabase' : 'none');
 }
@@ -156,6 +213,10 @@ export interface InboxRecord {
   lastMessageAt: string | null;
   lastDirection: string | null;
   labels: string[];
+  /** How many properties the conversation is linked to (the owner's properties on the same phone or owner key). */
+  propertyCount: number;
+  /** The owner name of the linked property, used when the conversation has no name. */
+  ownerName: string;
 }
 
 export type InboxSortKey = 'name' | 'last_message' | 'last_message_at';
@@ -222,6 +283,8 @@ function toInboxRecord(row: Record<string, unknown>): InboxRecord {
     lastMessageAt: (row.last_message_at as string | null) ?? null,
     lastDirection: (row.last_direction as string | null) ?? null,
     labels: (row.labels as string[] | null) ?? [],
+    propertyCount: 0,
+    ownerName: '',
   };
 }
 
@@ -235,6 +298,7 @@ export interface ThreadMessage {
   fromNumber: string | null;
   toNumber: string | null;
   attachmentCount: number;
+  attachments: { index: number; contentType: string; url: string }[];
   createdAt: string;
 }
 
@@ -243,7 +307,7 @@ export async function getConversationMessages(contactId: string): Promise<Thread
   if (!supabase) return [];
   const { data, error } = await supabase
     .from('smartercontact_messages')
-    .select('message_id,direction,type,content,status,source,from_number,to_number,attachment_count,created_at')
+    .select('message_id,direction,type,content,status,source,from_number,to_number,attachment_count,attachments,created_at')
     .eq('contact_id', contactId)
     .order('created_at', { ascending: true })
     .limit(500);
@@ -258,6 +322,9 @@ export async function getConversationMessages(contactId: string): Promise<Thread
     fromNumber: (row.from_number as string | null) ?? null,
     toNumber: (row.to_number as string | null) ?? null,
     attachmentCount: (row.attachment_count as number) ?? 0,
+    attachments: ((row.attachments as { index?: number; content_type?: string; url?: string }[] | null) ?? [])
+      .filter((a) => !!a.url)
+      .map((a, position) => ({ index: a.index ?? position, contentType: a.content_type ?? 'application/octet-stream', url: a.url as string })),
     createdAt: row.created_at as string,
   }));
 }
@@ -323,18 +390,60 @@ export async function exportInbox(query: Omit<InboxQuery, 'page' | 'pageSize'>, 
   return rows;
 }
 
+// Phone numbers that must not be texted, as 10 digits: the SmarterContact Opted Out folder (synced conversations)
+// and the suppression list: opt-outs, wrong numbers and Do Not Call numbers from imports. Read in pages of 1,000 rows.
+export async function getSuppressedPhones(): Promise<Set<string>> {
+  const phones = new Set<string>();
+  if (!supabase) return phones;
+  const pageSize = 1000;
+
+  for (let from = 0; ; from += pageSize) {
+    const { data, error } = await supabase
+      .from('smartercontact_conversations')
+      .select('contact_id,phone')
+      .contains('folders', ['opted_out'])
+      .order('contact_id', { ascending: true })
+      .range(from, from + pageSize - 1);
+    if (error) throw new Error(`Opted-out contacts could not be loaded: ${error.message}`);
+    for (const row of data ?? []) if (row.phone) phones.add(normalizePhone(row.phone as string));
+    if ((data ?? []).length < pageSize) break;
+  }
+
+  for (let from = 0; ; from += pageSize) {
+    const { data, error } = await supabase
+      .from('phone_suppressions')
+      .select('id,phone_numbers(phone_number)')
+      .in('suppression_type', ['opt_out', 'wrong_number', 'dnc'])
+      .order('id', { ascending: true })
+      .range(from, from + pageSize - 1);
+    if (error) throw new Error(`The suppression list could not be loaded: ${error.message}`);
+    for (const row of (data ?? []) as unknown as { phone_numbers: { phone_number: string } | null }[]) {
+      const number = row.phone_numbers?.phone_number;
+      if (number) phones.add(normalizePhone(number));
+    }
+    if ((data ?? []).length < pageSize) break;
+  }
+
+  phones.delete('');
+  return phones;
+}
+
 // How many conversations are in each folder. A conversation can be in several folders.
 export async function getInboxCounts(): Promise<Record<InboxFolderKey, number>> {
   const counts = Object.fromEntries(INBOX_FOLDER_OPTIONS.map((f) => [f.key, 0])) as Record<InboxFolderKey, number>;
   if (!supabase) return counts;
-  for (const folder of INBOX_FOLDER_OPTIONS) {
-    const { count, error } = await supabase
-      .from('smartercontact_conversations')
-      .select('contact_id', { count: 'exact', head: true })
-      .contains('folders', [folder.key]);
+  // All folder counts at once (one request each), instead of one after another.
+  const client = supabase;
+  const results = await Promise.all(
+    INBOX_FOLDER_OPTIONS.map((folder) =>
+      client.from('smartercontact_conversations').select('contact_id', { count: 'exact', head: true }).contains('folders', [folder.key]),
+    ),
+  );
+  INBOX_FOLDER_OPTIONS.forEach((folder, index) => {
+    const { count, error } = results[index];
     if (error) throw new Error(`Could not load inbox counts: ${error.message}`);
     counts[folder.key] = count ?? 0;
-  }
+  });
   return counts;
 }
 
@@ -344,17 +453,34 @@ export async function listInbox(query: InboxQuery): Promise<{ rows: InboxRecord[
   const request = inboxRequest(query);
   if (!request) return { rows: [], total: 0, lastSynced: null };
   const from = (query.page - 1) * query.pageSize;
-  const { data, error, count } = await request.range(from, from + query.pageSize - 1);
+  // The page and the "last synced" time are asked for at the same time.
+  const [{ data, error, count }, { data: latest }] = await Promise.all([
+    request.range(from, from + query.pageSize - 1),
+    supabase.from('smartercontact_conversations').select('updated_at').order('updated_at', { ascending: false }).limit(1),
+  ]);
   if (error) throw new Error(`Could not load the inbox: ${error.message}`);
 
-  const { data: latest } = await supabase
-    .from('smartercontact_conversations')
-    .select('updated_at')
-    .order('updated_at', { ascending: false })
-    .limit(1);
+  const rows = ((data ?? []) as Record<string, unknown>[]).map(toInboxRecord);
+  if (rows.length > 0) {
+    // How many properties each conversation on this page is linked to, for the owner's property count.
+    const { data: links } = await supabase
+      .from('sc_conversation_properties')
+      .select('contact_id,properties(owner_name)')
+      .in('contact_id', rows.map((r) => r.contactId));
+    const counts = new Map<string, number>();
+    const owners = new Map<string, string>();
+    for (const link of (links ?? []) as unknown as { contact_id: string; properties: { owner_name: string | null } | null }[]) {
+      counts.set(link.contact_id, (counts.get(link.contact_id) ?? 0) + 1);
+      if (!owners.has(link.contact_id) && link.properties?.owner_name) owners.set(link.contact_id, link.properties.owner_name);
+    }
+    for (const row of rows) {
+      row.propertyCount = counts.get(row.contactId) ?? 0;
+      row.ownerName = owners.get(row.contactId) ?? '';
+    }
+  }
 
   return {
-    rows: ((data ?? []) as Record<string, unknown>[]).map(toInboxRecord),
+    rows,
     total: count ?? 0,
     lastSynced: (latest?.[0]?.updated_at as string | undefined) ?? null,
   };
@@ -606,6 +732,15 @@ export async function commitImport(args: {
     }
   }
 
+  // Line the new properties up with the conversations already in the system: link conversations by phone and owner,
+  // then mark the responders. A failure here does not undo the import; the next sync cycle repeats both steps.
+  let alignError: string | null = null;
+  if (committed > 0) {
+    const matched = await client.rpc('sc_match_conversations');
+    const marked = matched.error ? matched : await client.rpc('sc_mark_responders');
+    if (matched.error || marked.error) alignError = (matched.error ?? marked.error)?.message ?? 'Matching failed.';
+  }
+
   const status: ImportBatchRecord['status'] =
     failed === 0 ? 'completed' : committed === 0 ? 'failed' : 'completed_with_errors';
 
@@ -615,7 +750,7 @@ export async function commitImport(args: {
       committed_rows: committed,
       failed_rows: failed,
       status,
-      error_summary: firstError ?? phoneError,
+      error_summary: firstError ?? phoneError ?? alignError,
     })
     .eq('id', batchId);
   if (finished.error) {
@@ -763,6 +898,35 @@ export interface DashboardSummary {
 }
 
 // Overview figures, counted in the database (dashboard_summary in supabase/migrations/010_dashboard_summary.sql).
+// Never marketed vs previously marketed, from the full outbound message history (migration 037).
+export async function getMarketingSplit(): Promise<{ never_marketed: number; previously_marketed: number; conversations_read_in_full: number; conversations_total: number }> {
+  const empty = { never_marketed: 0, previously_marketed: 0, conversations_read_in_full: 0, conversations_total: 0 };
+  if (!supabase) return empty;
+  const { data, error } = await supabase.rpc('sc_marketing_split');
+  if (error) throw new Error(`Could not load the marketing history: ${error.message}`);
+  const row = (data ?? {}) as Record<string, number>;
+  return {
+    never_marketed: row.never_marketed ?? 0,
+    previously_marketed: row.previously_marketed ?? 0,
+    conversations_read_in_full: row.conversations_read_in_full ?? 0,
+    conversations_total: row.conversations_total ?? 0,
+  };
+}
+
+// Lead groups from the SmarterContact labels of linked conversations (migration 035). Each property is counted once.
+export async function getLeadGroups(): Promise<{ nurture: number; scheduled_followup: number; excluded: number; linked_properties: number }> {
+  if (!supabase) return { nurture: 0, scheduled_followup: 0, excluded: 0, linked_properties: 0 };
+  const { data, error } = await supabase.rpc('sc_lead_groups');
+  if (error) throw new Error(`Could not load the lead groups: ${error.message}`);
+  const row = (data ?? {}) as Record<string, number>;
+  return {
+    nurture: row.nurture ?? 0,
+    scheduled_followup: row.scheduled_followup ?? 0,
+    excluded: row.excluded ?? 0,
+    linked_properties: row.linked_properties ?? 0,
+  };
+}
+
 export async function getDashboardSummary(): Promise<DashboardSummary> {
   if (!supabase) {
     return {
@@ -877,4 +1041,183 @@ export async function getActivity(): Promise<DataResult<ActivityEvent[]>> {
   ];
   events.sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
   return { data: events.slice(0, 5), source: 'supabase', fetchedAt: new Date().toISOString() };
+}
+
+// ---------- conversation notes (migration 041) ----------
+
+export interface ConversationNote {
+  id: string;
+  body: string;
+  authorId: string | null;
+  createdAt: string;
+}
+
+// The notes on one SmarterContact conversation, newest first.
+export async function listConversationNotes(contactId: string): Promise<ConversationNote[]> {
+  if (!supabase) return [];
+  const { data, error } = await supabase
+    .from('conversation_notes')
+    .select('id,body,author_id,created_at')
+    .eq('contact_id', contactId)
+    .order('created_at', { ascending: false })
+    .limit(200);
+  if (error) throw new Error(`Could not load the notes: ${error.message}`);
+  return (data ?? []).map((row) => ({
+    id: row.id as string,
+    body: row.body as string,
+    authorId: (row.author_id as string | null) ?? null,
+    createdAt: row.created_at as string,
+  }));
+}
+
+export async function addConversationNote(contactId: string, body: string): Promise<void> {
+  if (!supabase) throw new Error('The database is not connected, so the note cannot be saved.');
+  const text = body.trim();
+  if (text.length === 0 || text.length > 4000) throw new Error('A note must be between 1 and 4000 characters.');
+  const { error } = await supabase.from('conversation_notes').insert({ contact_id: contactId, body: text });
+  if (error) throw new Error(`The note could not be saved: ${error.message}`);
+}
+
+// ---------- property facts shown beside a conversation ----------
+
+export interface PropertyFacts {
+  id: string;
+  apn: string;
+  county: string;
+  state: string;
+  acres: number;
+  ownerName: string;
+  ownerType: string | null;
+  propertyAddress: string;
+  propertyCity: string;
+  propertyZip: string;
+  mailingAddress: string;
+  mailingCity: string;
+  mailingState: string;
+  mailingZip: string;
+  latitude: number | null;
+  longitude: number | null;
+  landUse: string;
+  zoning: string;
+  assessedValue: number | null;
+  marketValue: number | null;
+  yearBuilt: number | null;
+  marketingStatus: string;
+  firstAcquiredAt: string | null;
+}
+
+export async function getPropertyFacts(id: string): Promise<PropertyFacts | null> {
+  if (!supabase) return null;
+  const { data, error } = await supabase
+    .from('properties')
+    .select(
+      'id,apn_raw,county,state,acreage,owner_name,owner_type,address,city,zip_code,mailing_address,mailing_city,mailing_state,mailing_zip,latitude,longitude,land_use,zoning,assessed_value,market_value,year_built,marketing_status,first_acquired_at,created_at',
+    )
+    .eq('id', id)
+    .maybeSingle();
+  if (error) throw new Error(`Could not load the property: ${error.message}`);
+  if (!data) return null;
+  const row = data as Record<string, unknown>;
+  const text = (key: string) => (row[key] as string | null) ?? '';
+  const num = (key: string) => (row[key] === null || row[key] === undefined ? null : Number(row[key]));
+  return {
+    id: row.id as string,
+    apn: text('apn_raw'),
+    county: text('county'),
+    state: text('state'),
+    acres: Number(row.acreage ?? 0),
+    ownerName: text('owner_name'),
+    ownerType: (row.owner_type as string | null) ?? null,
+    propertyAddress: text('address'),
+    propertyCity: text('city'),
+    propertyZip: text('zip_code'),
+    mailingAddress: text('mailing_address'),
+    mailingCity: text('mailing_city'),
+    mailingState: text('mailing_state'),
+    mailingZip: text('mailing_zip'),
+    latitude: num('latitude'),
+    longitude: num('longitude'),
+    landUse: text('land_use'),
+    zoning: text('zoning'),
+    assessedValue: num('assessed_value'),
+    marketValue: num('market_value'),
+    yearBuilt: num('year_built'),
+    marketingStatus: text('marketing_status'),
+    firstAcquiredAt: (row.first_acquired_at as string | null) ?? (row.created_at as string | null),
+  };
+}
+
+// The NextCrest-only contact fields of one conversation (migration 043), as saved values keyed by field key.
+export async function getConversationFields(contactId: string): Promise<Record<string, string>> {
+  if (!supabase) return {};
+  const { data, error } = await supabase.from('conversation_fields').select('data').eq('contact_id', contactId).maybeSingle();
+  if (error) throw new Error(`Could not load the contact fields: ${error.message}`);
+  return (data?.data ?? {}) as Record<string, string>;
+}
+
+// Saves changed NextCrest-only fields, keeping the other saved values.
+export async function saveConversationFields(contactId: string, changed: Record<string, string>): Promise<void> {
+  if (!supabase) throw new Error('The database is not connected, so the fields cannot be saved.');
+  const current = await getConversationFields(contactId);
+  const merged = { ...current, ...changed };
+  const { error } = await supabase
+    .from('conversation_fields')
+    .upsert({ contact_id: contactId, data: merged, updated_at: new Date().toISOString() }, { onConflict: 'contact_id' });
+  if (error) throw new Error(`The fields could not be saved: ${error.message}`);
+}
+
+export interface OwnerProperty {
+  id: string;
+  apn: string;
+  county: string;
+  state: string;
+  acres: number;
+  marketingStatus: string;
+  timesContacted: number;
+  lastContactedAt: string | null;
+}
+
+// The other properties of the same owner name (owner_name_key, migration 044), not including this one.
+export async function getOwnerProperties(propertyId: string): Promise<OwnerProperty[]> {
+  if (!supabase) return [];
+  const { data: self, error: selfError } = await supabase.from('properties').select('owner_name_key').eq('id', propertyId).maybeSingle();
+  if (selfError) throw new Error(`Could not load the owner: ${selfError.message}`);
+  const key = self?.owner_name_key as string | null | undefined;
+  if (!key) return [];
+  const { data, error } = await supabase
+    .from('properties')
+    .select('id,apn_raw,internal_id,county,state,acreage,marketing_status,total_contacts,last_contacted_at')
+    .eq('owner_name_key', key)
+    .neq('id', propertyId)
+    .order('apn_raw')
+    .limit(50);
+  if (error) throw new Error(`Could not load the owner's properties: ${error.message}`);
+  return (data ?? []).map((row) => ({
+    id: row.id as string,
+    apn: (row.apn_raw as string | null) ?? (row.internal_id as string),
+    county: (row.county as string | null) ?? '',
+    state: (row.state as string | null) ?? '',
+    acres: Number(row.acreage ?? 0),
+    marketingStatus: (row.marketing_status as string | null) ?? '',
+    timesContacted: Number(row.total_contacts ?? 0),
+    lastContactedAt: (row.last_contacted_at as string | null) ?? null,
+  }));
+}
+
+// Adds a phone number to NextCrest's Do Not Call list. Exports leave it out. This does not change SmarterContact's own list,
+// which its API does not allow.
+export async function addPhoneToDoNotCall(phone: string): Promise<void> {
+  if (!supabase) throw new Error('The database is not connected, so the number cannot be added.');
+  const digits = phone.replace(/\D/g, '').slice(-10);
+  if (digits.length !== 10) throw new Error('This conversation has no 10-digit phone number to add.');
+  const { error: upsertError } = await supabase
+    .from('phone_numbers')
+    .upsert({ phone_number: digits, dnc: true }, { onConflict: 'phone_number' });
+  if (upsertError) throw new Error(`The number could not be saved: ${upsertError.message}`);
+  const { data, error: readError } = await supabase.from('phone_numbers').select('id').eq('phone_number', digits).single();
+  if (readError || !data) throw new Error(`The number could not be read back: ${readError?.message ?? 'not found'}`);
+  const { error } = await supabase
+    .from('phone_suppressions')
+    .upsert({ phone_number_id: data.id, suppression_type: 'dnc', source: 'inbox' }, { onConflict: 'phone_number_id,suppression_type', ignoreDuplicates: true });
+  if (error) throw new Error(`The Do Not Call entry could not be saved: ${error.message}`);
 }

@@ -4,11 +4,11 @@ import { Link, useParams } from 'react-router-dom';
 import { PageHeader } from '@/components/ui/PageHeader';
 import { CardSkeleton, EmptyState, ErrorState } from '@/components/ui/States';
 import { StatusChip } from '@/components/ui/StatusChip';
-import { useRecordsQuery } from '@/hooks/useNextCrestData';
+import { useQuery } from '@tanstack/react-query';
+import { getCountyMarket, getOwnerProperties, getPropertyRecord } from '@/services/nextcrestData';
 import type { LandRecord, MarketingStatus } from '@/data/types';
 import { normalizePhone } from '@/lib/campaignExport';
 import { daysSince, formatAcres, formatDate } from '@/lib/format';
-import { buildMarkets } from '@/lib/metrics';
 import { splitOwner } from '@/lib/owner';
 
 const TABS = [
@@ -62,7 +62,16 @@ function Panel({ title, children }: { title: string; children: ReactNode }) {
 
 export function PropertyDetail() {
   const { id = '' } = useParams();
-  const { data, isPending, isError, refetch } = useRecordsQuery();
+  const { data: record, isPending, isError, refetch } = useQuery({
+    queryKey: ['property', id],
+    queryFn: () => getPropertyRecord(id),
+    enabled: id !== '',
+  });
+  const { data: market } = useQuery({
+    queryKey: ['county-market', record?.state, record?.county],
+    queryFn: () => getCountyMarket(record!.state, record!.county),
+    enabled: Boolean(record),
+  });
   const [tab, setTab] = useState<Tab>('Overview');
 
   if (isPending) {
@@ -83,7 +92,6 @@ export function PropertyDetail() {
     );
   }
 
-  const record = data.data.find((r) => r.id === id);
   if (!record) {
     return (
       <div className="space-y-6">
@@ -107,7 +115,7 @@ export function PropertyDetail() {
     );
   }
 
-  const dataset = buildMarkets(data.data).find((m) => m.state === record.state && m.county === record.county);
+  const dataset = market ?? undefined;
 
   return (
     <div className="space-y-6">
@@ -118,7 +126,7 @@ export function PropertyDetail() {
         actions={<StatusChip status={record.status} />}
       />
 
-      <div role="tablist" aria-label="Property sections" className="flex gap-1 overflow-x-auto border-b border-border">
+      <div role="tablist" aria-label="Property sections" className="flex gap-1 overflow-x-auto border-b border-border [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         {TABS.map((t) => (
           <button
             key={t}
@@ -210,7 +218,40 @@ function OverviewTab({ record, dataset }: { record: LandRecord; dataset: string 
           )}
         </ol>
       </Panel>
+      <div className="lg:col-span-2">
+        <OwnerPropertiesPanel propertyId={record.id} />
+      </div>
     </div>
+  );
+}
+
+// The owner's other properties, so the team sees the whole portfolio of one owner and its contact history.
+function OwnerPropertiesPanel({ propertyId }: { propertyId: string }) {
+  const owned = useQuery({ queryKey: ['owner-properties', propertyId], queryFn: () => getOwnerProperties(propertyId) });
+  return (
+    <Panel title="Other properties of this owner">
+      {owned.isPending && <p className="text-sm text-muted-foreground">Loading…</p>}
+      {owned.isError && <p role="alert" className="text-sm text-red-600 dark:text-red-400">The owner's properties could not be loaded.</p>}
+      {owned.data && owned.data.length === 0 && <p className="text-sm text-muted-foreground">No other property has this owner name.</p>}
+      {owned.data && owned.data.length > 0 && (
+        <ul className="divide-y divide-border text-sm">
+          {owned.data.map((property) => (
+            <li key={property.id} className="flex flex-wrap items-center justify-between gap-2 py-2">
+              <Link to={`/properties/${property.id}`} className="font-mono text-xs text-primary hover:underline">
+                {property.apn}
+              </Link>
+              <span className="text-muted-foreground">
+                {property.county}, {property.state} · {formatAcres(property.acres)}
+              </span>
+              <span className="text-muted-foreground">
+                {property.timesContacted > 0 ? `Texted ${property.timesContacted}x` : 'Never texted'}
+                {property.lastContactedAt && ` · last ${formatDate(property.lastContactedAt)}`}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Panel>
   );
 }
 

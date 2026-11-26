@@ -1,5 +1,5 @@
-// Turns one SmarterContact contact and its message history (from the MCP connector) into the row that
-// smartercontact_mcp_sync (migration 020) loads. Pure functions, no network, so the rules are tested offline.
+// Pure helpers for the SmarterContact sync. They turn REST API contacts and messages into the rows the Inbox tables
+// store, and into the campaign-history row that smartercontact_mcp_sync (migration 020) loads. No network, so the rules are tested offline.
 
 import { OPT_OUT_WORDS, normalizePhone } from '../webhook/classify.ts';
 
@@ -9,13 +9,15 @@ export interface ContactSummary {
   phone: string;
 }
 
-// One message from read_conversation. Only the fields the sync needs are typed.
+// One message from the REST messages endpoint. Only the fields the sync needs are typed.
 export interface ConversationItem {
   direction: 'incoming' | 'outgoing' | string;
   type: string;
   content: string;
   createdAt: string;
   source?: string;
+  status?: string;
+  attachments?: { content_type?: string }[];
 }
 
 export interface SyncRow {
@@ -89,23 +91,47 @@ export interface InboxDetails {
 
 // Builds the Inbox detail columns from the newest message (the conversation is read newest first) and the
 // contact's label ids. Label ids that have no name in the account are left out. Text is capped at 500 characters.
+// What the Inbox shows for the newest message: its text, or what kind of entry it is (voice message, missed call, call).
+export function describeLastMessage(newest: ConversationItem | undefined): string | null {
+  if (!newest) return null;
+  if (newest.type === 'vmd') return 'Voice message';
+  if (newest.type === 'call' && (newest.attachments ?? []).some((a) => a.content_type?.startsWith('audio/'))) return 'Voice message';
+  if (newest.type === 'call') return newest.status === 'missed' ? 'Missed call' : 'Call';
+  const text = (newest.content ?? '').replace(/\s+/g, ' ').trim();
+  if (!text) return null;
+  return text.length > 500 ? `${text.slice(0, 497)}...` : text;
+}
+
 export function toInboxDetails(newest: ConversationItem | undefined, labelIds: string[], labelNames: Map<string, string>): InboxDetails {
-  const text = (newest?.content ?? '').replace(/\s+/g, ' ').trim();
   return {
-    last_message: newest ? (text.length > 500 ? `${text.slice(0, 497)}...` : text) || (newest.type === 'call' ? 'Call' : null) : null,
+    last_message: describeLastMessage(newest),
     last_message_at: newest?.createdAt ?? null,
     last_direction: newest?.direction ?? null,
     labels: labelIds.map((id) => labelNames.get(id)).filter((name): name is string => !!name),
   };
 }
 
-// A message as read_conversation returns it (the fields the thread shows).
+export interface StoredAttachment {
+  index: number;
+  content_type: string;
+  url: string;
+}
+
+// Keeps the playable links of a message's attachments. Entries without a url are dropped.
+export function keepAttachments(items: unknown[] | undefined): StoredAttachment[] {
+  return (items ?? []).flatMap((a, position) => {
+    const item = a as { index?: number; content_type?: string; url?: string };
+    return item.url ? [{ index: item.index ?? position, content_type: item.content_type ?? 'application/octet-stream', url: item.url }] : [];
+  });
+}
+
+// A message as the REST messages endpoint returns it (the fields the thread shows).
 export interface ThreadItem extends ConversationItem {
   id: string;
   status?: string;
   fromNumber?: string;
   toNumber?: string;
-  attachments?: unknown[];
+  attachments?: StoredAttachment[];
 }
 
 export interface MessageRow {
@@ -119,10 +145,11 @@ export interface MessageRow {
   from_number: string | null;
   to_number: string | null;
   attachment_count: number;
+  attachments: StoredAttachment[];
   created_at: string;
 }
 
-// One stored message for the Inbox thread. Attachment links are dropped (they expire); only the count is kept.
+// One stored message for the Inbox thread. Attachment links are kept; they are renewed when the conversation is re-read.
 // Returns null for items that are not sent or received messages (for example call entries without a direction).
 export function toMessageRow(contactId: string, item: ThreadItem): MessageRow | null {
   if (!item.id || (item.direction !== 'incoming' && item.direction !== 'outgoing') || !item.createdAt) return null;
@@ -138,6 +165,7 @@ export function toMessageRow(contactId: string, item: ThreadItem): MessageRow | 
     from_number: item.fromNumber ?? null,
     to_number: item.toNumber ?? null,
     attachment_count: Array.isArray(item.attachments) ? item.attachments.length : 0,
+    attachments: keepAttachments(item.attachments),
     created_at: item.createdAt,
   };
 }

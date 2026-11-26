@@ -1,4 +1,5 @@
 import type { LandRecord, MarketingStatus, OwnerType } from '@/data/types';
+import { followUpDue } from './followUp';
 
 // Row shape returned by the properties query in src/services/nextcrestData.ts.
 export interface PropertyRow {
@@ -22,23 +23,25 @@ export interface PropertyRow {
 }
 
 // The database stores the marketing stage as one word. The app's screens use a status per contact count.
-export function toMarketingStatus(marketing: string | null, totalContacts: number): MarketingStatus {
+// Follow-up and re-hit timing (followUp.ts) applies to contacted properties that are not responders, opted out or wrong.
+export function toMarketingStatus(
+  marketing: string | null,
+  totalContacts: number,
+  lastContactedAt: string | null = null,
+  now: Date = new Date(),
+): MarketingStatus {
   const contacts = Math.max(0, totalContacts);
   const contactedStage: MarketingStatus = contacts >= 3 ? 'contacted_3' : contacts === 2 ? 'contacted_2' : 'contacted_1';
 
-  switch (marketing) {
-    case 'opted_out':
-      return 'opted_out';
-    case 'wrong_number':
-      return 'wrong_number';
-    case 'follow_up_due':
-      return 'followup_due';
-    case 'contacted':
-    case 'responded':
-      return contacts === 0 ? 'contacted_1' : contactedStage;
-    default:
-      return contacts > 0 ? contactedStage : 'never_marketed';
+  if (marketing === 'opted_out') return 'opted_out';
+  if (marketing === 'wrong_number') return 'wrong_number';
+  if (marketing === 'follow_up_due') return 'followup_due';
+  if (marketing !== 'responded') {
+    const due = followUpDue(contacts, lastContactedAt, now);
+    if (due) return due;
   }
+  if (marketing === 'contacted' || marketing === 'responded') return contacts === 0 ? 'contacted_1' : contactedStage;
+  return contacts > 0 ? contactedStage : 'never_marketed';
 }
 
 // Business owners are recognised from their name. Anything else is an individual.
@@ -107,7 +110,7 @@ export function toLandRecord(row: PropertyRow): LandRecord {
     ownerName: row.owner_name ?? '',
     ownerType: toOwnerType(row.owner_type, row.owner_name),
     phone: phones[0] ?? '',
-    status: toMarketingStatus(row.marketing_status, totalContacts),
+    status: toMarketingStatus(row.marketing_status, totalContacts, row.last_contacted_at),
     timesContacted: totalContacts,
     responded: row.marketing_status === 'responded',
     lastContactedAt: row.last_contacted_at,

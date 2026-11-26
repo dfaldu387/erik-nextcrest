@@ -1,10 +1,10 @@
 import { useQuery } from '@tanstack/react-query';
-import { ArrowRight, CalendarClock, CheckCircle2, Database, Download, Filter, MoreHorizontal, PhoneOff, RefreshCw, Search, Send, ShieldCheck, Sprout, Upload, type LucideIcon } from 'lucide-react';
+import { ArrowRight, Ban, CalendarClock, CheckCircle2, Database, Download, Filter, MoreHorizontal, PhoneOff, RefreshCw, Search, Send, ShieldCheck, Sprout, Upload, type LucideIcon } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { Bar, BarChart, CartesianGrid, Cell, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { Link } from 'react-router-dom';
 import { EmptyState, ErrorState, Skeleton } from '@/components/ui/States';
-import { useActivityQuery, useDashboardSummaryQuery } from '@/hooks/useNextCrestData';
+import { useActivityQuery, useDashboardSummaryQuery, useLeadGroupsQuery, useMarketingSplitQuery } from '@/hooks/useNextCrestData';
 import { greeting } from '@/lib/greeting';
 import { daysSince, formatCount, formatDate, formatTime } from '@/lib/format';
 import type { LandRecord } from '@/data/types';
@@ -23,6 +23,9 @@ const TONE = {
 } as const;
 
 // Chart tooltips use the app's dark card colours (the chart library defaults to white).
+// The item line inside a tooltip is plain text: it must not repeat the box's background and border.
+const TOOLTIP_ITEM_STYLE = { color: 'hsl(var(--foreground))', fontSize: 12, padding: 0 };
+
 const TOOLTIP_STYLE = {
   backgroundColor: 'hsl(var(--card))',
   border: '1px solid hsl(var(--border))',
@@ -33,6 +36,8 @@ const TOOLTIP_STYLE = {
 
 export function CommandCenter() {
   const summaryQuery = useDashboardSummaryQuery();
+  const leadQuery = useLeadGroupsQuery();
+  const splitQuery = useMarketingSplitQuery();
   const activity = useActivityQuery();
   const imports = useQuery({ queryKey: ['import-batches'], queryFn: () => listImportBatches(4) });
   const followUps = useQuery({
@@ -145,6 +150,33 @@ export function CommandCenter() {
         <KpiCard title="Responded" value={formatCount(s.responded)} caption={`${pct(s.responded)} of properties`} icon={CheckCircle2} tone="green" to="/responders" />
       </section>
 
+      {/* Lead groups from the SmarterContact labels. Each property is counted once, in the first group that applies. */}
+      <section aria-label="Lead groups" className="space-y-3">
+        <div>
+          <h2 className="text-base font-semibold">Responders and lead groups</h2>
+          <p className="text-xs text-muted-foreground">From SmarterContact labels. Follow-up dates are not available yet, so scheduled follow-ups come from the follow-up labels.</p>
+        </div>
+        <div className="grid gap-4 sm:grid-cols-3">
+          <KpiCard title="Nurture" value={formatCount(leadQuery.data?.nurture ?? 0)} caption="Positive responses that need comping" icon={Sprout} tone="green" to="/responders" />
+          <KpiCard title="Scheduled follow-up" value={formatCount(leadQuery.data?.scheduled_followup ?? 0)} caption="Sellers who asked to be contacted later" icon={CalendarClock} tone="orange" to="/followups" />
+          <KpiCard title="Excluded from marketing" value={formatCount(leadQuery.data?.excluded ?? 0)} caption="Not interested, disqualified or wrong number" icon={Ban} tone="purple" to="/responders" />
+        </div>
+      </section>
+
+      {/* Never marketed vs previously marketed, from the full outbound message history. */}
+      <section aria-label="Marketing history" className="space-y-3">
+        <div>
+          <h2 className="text-base font-semibold">Marketing history</h2>
+          <p className="text-xs text-muted-foreground">
+            {formatCount(splitQuery.data?.conversations_read_in_full ?? 0)} of {formatCount(splitQuery.data?.conversations_total ?? 0)} conversations have been read in full. The counts are complete when this reaches all of them.
+          </p>
+        </div>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <KpiCard title="Never marketed" value={formatCount(splitQuery.data?.never_marketed ?? 0)} caption="No outbound text and no campaign contact" icon={Sprout} tone="blue" to="/properties?status=never_marketed" />
+          <KpiCard title="Previously marketed" value={formatCount(splitQuery.data?.previously_marketed ?? 0)} caption="Has an outbound text or a campaign contact" icon={Send} tone="orange" to="/properties" />
+        </div>
+      </section>
+
       {/* Row 2: county chart, status donut, markets */}
       <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-[1.4fr_1fr_1.6fr]">
         <section className={`${PANEL} md:col-span-2 xl:col-span-1`} aria-labelledby="county-heading">
@@ -178,7 +210,7 @@ export function CommandCenter() {
                     cursor={{ fill: 'hsl(var(--muted))' }}
                     formatter={(value, name) => [formatCount(Number(value)), name === 'texted' ? 'Texted' : 'Not yet texted']}
                     contentStyle={TOOLTIP_STYLE}
-                    itemStyle={TOOLTIP_STYLE}
+                    itemStyle={TOOLTIP_ITEM_STYLE}
                   />
                   <Bar dataKey="notTexted" stackId="c" fill="#3B82F6" />
                   <Bar dataKey="texted" stackId="c" fill="#8B5CF6" radius={[6, 6, 0, 0]} />
@@ -210,7 +242,7 @@ export function CommandCenter() {
                         <Cell key={slice.name} fill={slice.fill} />
                       ))}
                     </Pie>
-                    <Tooltip formatter={(value) => formatCount(Number(value))} contentStyle={TOOLTIP_STYLE} itemStyle={TOOLTIP_STYLE} />
+                    <Tooltip formatter={(value) => formatCount(Number(value))} contentStyle={TOOLTIP_STYLE} itemStyle={TOOLTIP_ITEM_STYLE} wrapperStyle={{ zIndex: 20 }} />
                   </PieChart>
                 </ResponsiveContainer>
                 <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
@@ -274,7 +306,7 @@ export function CommandCenter() {
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={progress} margin={{ top: 4, right: 0, bottom: 0, left: 0 }} barCategoryGap="28%">
                   <XAxis dataKey="stage" tickLine={false} axisLine={false} tick={{ fontSize: 11, fill: '#94A3B8' }} />
-                  <Tooltip cursor={{ fill: 'hsl(var(--muted))' }} formatter={(value) => [formatCount(Number(value)), 'Properties']} contentStyle={TOOLTIP_STYLE} itemStyle={TOOLTIP_STYLE} />
+                  <Tooltip cursor={{ fill: 'hsl(var(--muted))' }} formatter={(value) => [formatCount(Number(value)), 'Properties']} contentStyle={TOOLTIP_STYLE} itemStyle={TOOLTIP_ITEM_STYLE} />
                   <Bar dataKey="count" fill="#8B5CF6" radius={[6, 6, 0, 0]} />
                 </BarChart>
               </ResponsiveContainer>

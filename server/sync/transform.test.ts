@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { isOptOutReply, mergeInboxFolders, toInboxDetails, toMessageRow, toSyncRow, type ConversationItem } from './transform.ts';
+import { isOptOutReply, mergeInboxFolders, describeLastMessage, toInboxDetails, toMessageRow, toSyncRow, type ConversationItem } from './transform.ts';
 
 describe('toMessageRow', () => {
-  it('keeps the thread fields and drops attachment links', () => {
+  it('keeps the thread fields and the playable attachment links', () => {
     const row = toMessageRow('c1', {
       id: 'm1',
       direction: 'outgoing',
@@ -26,9 +26,9 @@ describe('toMessageRow', () => {
       from_number: '+13369791197',
       to_number: '+18434758031',
       attachment_count: 1,
+      attachments: [{ index: 0, content_type: 'application/octet-stream', url: 'https://files.example/x.jpg' }],
       created_at: '2026-11-09T10:38:00-05:00',
     });
-    expect(JSON.stringify(row)).not.toContain('files.example');
   });
 
   it('skips items without a direction or time', () => {
@@ -157,5 +157,25 @@ describe('toSyncRow', () => {
     const row = toSyncRow(contact, [incoming('STOP', '2026-11-25T00:30:00Z', 'direct'), outgoing('2026-11-24T10:28:00Z')]);
     expect(row?.opted_out).toBe(false);
     expect(row?.replied).toBe(false);
+  });
+});
+
+describe('describeLastMessage', () => {
+  it('labels a voice message, a missed call and a completed call as the Inbox shows them', () => {
+    expect(describeLastMessage({ direction: 'incoming', type: 'vmd', content: '', createdAt: '2026-11-24T00:00:00Z' })).toBe('Voice message');
+    expect(describeLastMessage({ direction: 'incoming', type: 'call', content: '', createdAt: '2026-11-24T00:00:00Z', status: 'missed' })).toBe('Missed call');
+    expect(describeLastMessage({ direction: 'outgoing', type: 'call', content: '', createdAt: '2026-11-24T00:00:00Z', status: 'completed' })).toBe('Call');
+  });
+  it('keeps the text of a message, and returns nothing for an empty one', () => {
+    expect(describeLastMessage({ direction: 'incoming', type: 'sms', content: '  Yes  please ', createdAt: '2026-11-24T00:00:00Z' })).toBe('Yes please');
+    expect(describeLastMessage({ direction: 'incoming', type: 'sms', content: '', createdAt: '2026-11-24T00:00:00Z' })).toBeNull();
+    expect(describeLastMessage(undefined)).toBeNull();
+  });
+});
+
+describe('describeLastMessage with recordings', () => {
+  it('shows a call that has a recording as a voice message, as SmarterContact does', () => {
+    expect(describeLastMessage({ direction: 'incoming', type: 'call', content: '', createdAt: '2026-11-24T00:00:00Z', status: 'missed', attachments: [{ content_type: 'audio/wav' }] })).toBe('Voice message');
+    expect(describeLastMessage({ direction: 'incoming', type: 'call', content: '', createdAt: '2026-11-24T00:00:00Z', status: 'missed', attachments: [] })).toBe('Missed call');
   });
 });

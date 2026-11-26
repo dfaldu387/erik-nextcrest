@@ -7,8 +7,9 @@ import { SmarterContactHistory } from '@/components/import/SmarterContactHistory
 import { PageHeader } from '@/components/ui/PageHeader';
 import { SearchableSelect } from '@/components/ui/SearchableSelect';
 import { CardSkeleton, EmptyState, ErrorState } from '@/components/ui/States';
-import { useRecordsQuery } from '@/hooks/useNextCrestData';
+import { useRecordsQuery, useSuppressedPhonesQuery } from '@/hooks/useNextCrestData';
 import { EXCLUSION_REASONS, SMARTERCONTACT_HEADERS, planCampaignExport, toSmarterContactRow } from '@/lib/campaignExport';
+import { freshExportPlan } from '@/lib/exportOptOuts';
 import { downloadCsv, toCsv } from '@/lib/csv';
 import { formatCount } from '@/lib/format';
 
@@ -72,7 +73,8 @@ function ExportBuilder() {
     () => (county ? records.filter((r) => `${r.county}|${r.state}` === county) : records),
     [records, county],
   );
-  const plan = useMemo(() => planCampaignExport(scoped), [scoped]);
+  const suppressed = useSuppressedPhonesQuery();
+  const plan = useMemo(() => planCampaignExport(scoped, suppressed.data), [scoped, suppressed.data]);
   const preview = plan.included.slice(0, 8);
 
   if (isPending) return <CardSkeleton rows={6} />;
@@ -90,9 +92,20 @@ function ExportBuilder() {
   }
 
   const scopeName = county ? county.split('|')[0] : 'All';
-  const exportFile = () => {
+  const [checkingOptOuts, setCheckingOptOuts] = useState(false);
+  const [exportNote, setExportNote] = useState<string | null>(null);
+  const exportFile = async () => {
+    setCheckingOptOuts(true);
+    setExportNote(null);
+    const fresh = await freshExportPlan(scoped);
+    setCheckingOptOuts(false);
+    if (!fresh.ok) {
+      setExportNote(fresh.message);
+      return;
+    }
     const stamp = new Date().toISOString().slice(0, 10);
-    downloadCsv(`SmarterContact_${scopeName}_${stamp}.csv`, toCsv(SMARTERCONTACT_HEADERS, plan.included.map(toSmarterContactRow)));
+    downloadCsv(`SmarterContact_${scopeName}_${stamp}.csv`, toCsv(SMARTERCONTACT_HEADERS, fresh.plan.included.map(toSmarterContactRow)));
+    setExportNote(`Opt-out list checked at ${new Date(fresh.checkedAt).toLocaleTimeString()}. ${fresh.plan.included.length.toLocaleString('en-US')} records exported.`);
   };
 
   return (
@@ -111,7 +124,12 @@ function ExportBuilder() {
             })}
           />
         </label>
-        <button type="button" className="btn-primary" onClick={exportFile} disabled={plan.included.length === 0}>
+        {exportNote && (
+          <p role="status" className="text-xs text-muted-foreground">
+            {exportNote}
+          </p>
+        )}
+        <button type="button" className="btn-primary" onClick={exportFile} disabled={checkingOptOuts || suppressed.isPending || suppressed.isError || plan.included.length === 0}>
           <Download size={16} aria-hidden="true" /> Download {formatCount(plan.included.length)} records
         </button>
       </div>

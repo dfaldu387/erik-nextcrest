@@ -1,4 +1,5 @@
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
+import { getLeadGroups, getMarketingSplit, getPropertyFacts, listConversationNotes } from '@/services/nextcrestData';
 import {
   getActivity,
   getDashboardSummary,
@@ -13,10 +14,16 @@ import {
   type InboxQuery,
   type PropertyQuery,
   searchProperties,
+  getSuppressedPhones,
 } from '@/services/nextcrestData';
 
 export function useRecordsQuery() {
   return useQuery({ queryKey: ['records'], queryFn: getRecords });
+}
+
+// Phones that exports must leave out (opted out in SmarterContact, or on the suppression list). Exports wait for it.
+export function useSuppressedPhonesQuery() {
+  return useQuery({ queryKey: ['suppressed-phones'], queryFn: getSuppressedPhones, staleTime: 5 * 60_000 });
 }
 
 // One page of properties. keepPreviousData keeps the old page on screen while the next one loads.
@@ -26,6 +33,14 @@ export function usePropertiesQuery(query: PropertyQuery) {
     queryFn: () => searchProperties(query),
     placeholderData: keepPreviousData,
   });
+}
+
+export function useMarketingSplitQuery() {
+  return useQuery({ queryKey: ['marketing-split'], queryFn: getMarketingSplit });
+}
+
+export function useLeadGroupsQuery() {
+  return useQuery({ queryKey: ['lead-groups'], queryFn: getLeadGroups });
 }
 
 export function useDashboardSummaryQuery() {
@@ -74,4 +89,12 @@ export function useMarketsQuery() {
 
 export function useActivityQuery() {
   return useQuery({ queryKey: ['activity'], queryFn: getActivity });
+}
+
+export function useConversationNotesQuery(contactId: string) {
+  return useQuery({ queryKey: ['conversation-notes', contactId], queryFn: () => listConversationNotes(contactId), enabled: contactId !== '' });
+}
+
+export function usePropertyFactsQuery(propertyId: string | null) {
+  return useQuery({ queryKey: ['property-facts', propertyId], queryFn: () => getPropertyFacts(propertyId as string), enabled: Boolean(propertyId) });
 }

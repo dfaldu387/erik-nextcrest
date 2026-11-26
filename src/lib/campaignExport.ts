@@ -3,6 +3,7 @@ import { formatOwnerParts, splitOwner } from './owner';
 
 export const EXCLUSION_REASONS = [
   'Opted out',
+  'Phone opted out (SmarterContact or suppression list)',
   'Wrong number',
   'Responder (handled manually)',
   'Missing phone',
@@ -26,7 +27,9 @@ export function normalizePhone(phone: string): string {
 
 // Suppression is applied here, once, for every export. Nothing is dropped silently:
 // each exclusion is counted under a reason the caller can display.
-export function planCampaignExport(records: LandRecord[]): ExportPlan {
+// suppressedPhones holds 10-digit numbers that must not be texted: opted out in SmarterContact, or on the suppression
+// list (opt-outs and wrong numbers). Any record with one of those numbers is excluded, whichever account it came from.
+export function planCampaignExport(records: LandRecord[], suppressedPhones: ReadonlySet<string> = new Set()): ExportPlan {
   const excluded = Object.fromEntries(EXCLUSION_REASONS.map((reason) => [reason, 0])) as Record<ExclusionReason, number>;
   const seenPhones = new Set<string>();
   const included: LandRecord[] = [];
@@ -47,6 +50,10 @@ export function planCampaignExport(records: LandRecord[]): ExportPlan {
     const phone = normalizePhone(record.phone);
     if (!phone) {
       excluded['Missing phone'] += 1;
+      continue;
+    }
+    if (suppressedPhones.has(phone)) {
+      excluded['Phone opted out (SmarterContact or suppression list)'] += 1;
       continue;
     }
     if (seenPhones.has(phone)) {

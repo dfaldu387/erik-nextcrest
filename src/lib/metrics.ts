@@ -59,11 +59,11 @@ export function buildMarkets(records: LandRecord[], now = Date.now()): Market[] 
     const upcoming = sinceContact.filter((d) => d < 90);
     const nextRehitDays = sinceContact.length === 0 ? 90 : upcoming.length === 0 ? 0 : 90 - Math.max(...upcoming);
 
-    const monthYear = new Date(purchasedAt).toLocaleDateString('en-US', { month: 'short', year: 'numeric' }).replace(' ', '');
+    const label = marketLabel(state, county, minAcres, maxAcres, purchasedAt, group.length);
 
     return {
-      id: `${state}-${county}`.toLowerCase(),
-      name: `${state}_${county}_10yr_${minAcres}-${maxAcres}ac_${monthYear}_${group.length}`,
+      id: label.id,
+      name: label.name,
       state,
       county,
       acreRange: `${minAcres}-${maxAcres}ac`,
@@ -105,4 +105,13 @@ export function buildCampaigns(records: LandRecord[]): Campaign[] {
       lastActivityAt,
     };
   });
+}
+
+/** The id and name of a county market. Shared by the list of markets and the property page's dataset label. */
+export function marketLabel(state: string, county: string, minAcres: number, maxAcres: number, purchasedAt: string, count: number): { id: string; name: string } {
+  const monthYear = new Date(purchasedAt).toLocaleDateString('en-US', { month: 'short', year: 'numeric' }).replace(' ', '');
+  return {
+    id: `${state}-${county}`.toLowerCase(),
+    name: `${state}_${county}_10yr_${minAcres}-${maxAcres}ac_${monthYear}_${count}`,
+  };
 }

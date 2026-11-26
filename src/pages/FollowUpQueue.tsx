@@ -6,13 +6,14 @@ import { PageHeader } from '@/components/ui/PageHeader';
 import { ProgressBar } from '@/components/ui/ProgressBar';
 import { EmptyState, ErrorState } from '@/components/ui/States';
 import { StatusChip } from '@/components/ui/StatusChip';
-import { useInboxCountsQuery, useInboxQuery, usePropertySummariesQuery, useRecordsQuery } from '@/hooks/useNextCrestData';
+import { useInboxCountsQuery, useInboxQuery, usePropertySummariesQuery, useRecordsQuery, useSuppressedPhonesQuery } from '@/hooks/useNextCrestData';
 import { EMPTY_INBOX_FILTERS } from '@/lib/inboxFilters';
 import { exportInbox, type InboxFolderKey, type InboxRecord } from '@/services/nextcrestData';
 import type { LandRecord } from '@/data/types';
 import { daysSince, formatAcres, formatDate } from '@/lib/format';
 import { downloadCsv, toCsv } from '@/lib/csv';
 import { planCampaignExport, SMARTERCONTACT_HEADERS, toSmarterContactRow } from '@/lib/campaignExport';
+import { freshExportPlan } from '@/lib/exportOptOuts';
 
 // Follow-up labels in SmarterContact. Each one gets its own tab, showing the Inbox conversations with that label.
 const FOLLOW_UP_LABELS = ['FU', 'FU-LT', 'FU-Offer', 'Lead-FU'] as const;
@@ -338,16 +339,6 @@ export function FollowUpQueue() {
   const counts = useInboxCountsQuery();
   // The label filter on Follow up today: "all" or one follow-up label.
   const [followLabel, setFollowLabel] = useState<'all' | (typeof FOLLOW_UP_LABELS)[number]>('all');
-  // Count of conversations carrying any follow-up label (for the Follow up today tab).
-  const followUpLabels = useInboxQuery({
-    folder: 'all',
-    search: '',
-    filters: { ...EMPTY_INBOX_FILTERS, includeLabels: [...FOLLOW_UP_LABELS], includeMode: 'any' },
-    sortKey: 'last_message_at',
-    sortDir: 'desc',
-    page: 1,
-    pageSize: 1,
-  });
   const awaiting = tab === 'awaiting';
 
   const activeTab = TABS.find((t) => t.key === tab)!;
@@ -358,14 +349,23 @@ export function FollowUpQueue() {
   const doneInQueue = queue.filter((r) => done.has(r.id)).length;
   const progress = queue.length ? Math.round((doneInQueue / queue.length) * 100) : 0;
 
-  const plan = planCampaignExport(queue);
+  const suppressed = useSuppressedPhonesQuery();
+  const plan = planCampaignExport(queue, suppressed.data);
 
-  const exportQueue = () => {
+  const [checkingOptOuts, setCheckingOptOuts] = useState(false);
+  const [exportNote, setExportNote] = useState<string | null>(null);
+  const exportQueue = async () => {
+    setCheckingOptOuts(true);
+    setExportNote(null);
+    const fresh = await freshExportPlan(queue);
+    setCheckingOptOuts(false);
+    if (!fresh.ok) {
+      setExportNote(fresh.message);
+      return;
+    }
     const stamp = new Date().toISOString().slice(0, 10);
-    downloadCsv(
-      `smartercontact_${tab}_${stamp}.csv`,
-      toCsv(SMARTERCONTACT_HEADERS, plan.included.map(toSmarterContactRow)),
-    );
+    downloadCsv(`smartercontact_${tab}_${stamp}.csv`, toCsv(SMARTERCONTACT_HEADERS, fresh.plan.included.map(toSmarterContactRow)));
+    setExportNote(`Opt-out list checked at ${new Date(fresh.checkedAt).toLocaleTimeString()}. ${fresh.plan.included.length.toLocaleString('en-US')} records exported.`);
   };
 
   const toggleDone = (id: string) =>
@@ -383,7 +383,7 @@ export function FollowUpQueue() {
         title="Follow-Up Queue"
         description="Your daily work. Pick a tab, work down the list, then export the file for SmarterContact."
         actions={
-          <button type="button" className="btn-primary" onClick={exportQueue} disabled={isPending || plan.included.length === 0}>
+          <button type="button" className="btn-primary" onClick={exportQueue} disabled={checkingOptOuts || isPending || suppressed.isPending || suppressed.isError || plan.included.length === 0}>
             <Download size={16} aria-hidden="true" />
             Export {plan.included.length.toLocaleString('en-US')} for SmarterContact
           </button>
@@ -392,13 +392,9 @@ export function FollowUpQueue() {
 
       <div role="tablist" aria-label="Queue" className="flex gap-1 overflow-x-auto border-b border-border [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         {TABS.map((t) => {
-          // Follow up today = the property queue plus the conversations carrying a follow-up label.
+          // Every tab counts the property queue (follow-up schedule and 90-day re-hit rule). Awaiting reply counts conversations.
           const count: number | null =
-            t.key === 'awaiting'
-              ? (counts.data?.awaiting_reply ?? 0)
-              : t.key === 'today'
-                ? (followUpLabels.data?.total ?? 0) + (data?.data ?? []).filter(t.matches).length
-                : (data?.data ?? []).filter(t.matches).length;
+            t.key === 'awaiting' ? (counts.data?.awaiting_reply ?? 0) : (data?.data ?? []).filter(t.matches).length;
           const selected = t.key === tab;
           return (
             <button
@@ -418,44 +414,18 @@ export function FollowUpQueue() {
         })}
       </div>
 
+      {exportNote && (
+        <p role="status" className="text-xs text-muted-foreground">
+          {exportNote}
+        </p>
+      )}
+
       {!awaiting && (
         <div className="card grid gap-4 p-5 md:grid-cols-[1fr_auto] md:items-center">
           <ProgressBar value={progress} label={`${doneInQueue} of ${queue.length} done in this view`} />
           <p className="text-xs text-muted-foreground md:text-right">
             Marking done is kept for this browser session until the database is connected.
           </p>
-        </div>
-      )}
-
-      {/* One table for all follow-up labels, with a filter to narrow it to one label. */}
-      {tab === 'today' && (
-        <div className="space-y-3">
-          <div className="flex flex-wrap items-center gap-2 text-sm">
-            <span className="text-muted-foreground">Label</span>
-            <div role="group" aria-label="Follow-up label filter" className="flex flex-wrap gap-1">
-              {(['all', ...FOLLOW_UP_LABELS] as const).map((option) => (
-                <button
-                  key={option}
-                  type="button"
-                  aria-pressed={followLabel === option}
-                  onClick={() => setFollowLabel(option)}
-                  className={`rounded-full border px-3 py-1 text-xs font-medium ${
-                    followLabel === option ? 'border-primary bg-primary text-primary-foreground' : 'border-border hover:bg-accent'
-                  }`}
-                >
-                  {option === 'all' ? 'All follow-ups' : option}
-                </button>
-              ))}
-            </div>
-          </div>
-          <LabelFollowUpTable
-            key={followLabel}
-            labels={followLabel === 'all' ? [...FOLLOW_UP_LABELS] : [followLabel]}
-            title={followLabel === 'all' ? 'Follow-up labels (FU, FU-LT, FU-Offer, Lead-FU)' : `${followLabel} follow-ups`}
-            emptyDescription={
-              followLabel === 'all' ? 'No conversations carry a follow-up label in the synced data.' : `No conversations have the ${followLabel} label in the synced data.`
-            }
-          />
         </div>
       )}
 
@@ -543,6 +513,38 @@ export function FollowUpQueue() {
                 sortValue: (r) => r.lastContactedAt,
               },
             ]}
+          />
+        </div>
+      )}
+
+      {/* Reference only: the SmarterContact follow-up labels. The queue above is driven by the rules, not by these labels. */}
+      {tab === 'today' && (
+        <div className="space-y-3">
+          <div className="flex flex-wrap items-center gap-2 text-sm">
+            <span className="text-muted-foreground">SmarterContact labels (reference)</span>
+            <div role="group" aria-label="Follow-up label filter" className="flex flex-wrap gap-1">
+              {(['all', ...FOLLOW_UP_LABELS] as const).map((option) => (
+                <button
+                  key={option}
+                  type="button"
+                  aria-pressed={followLabel === option}
+                  onClick={() => setFollowLabel(option)}
+                  className={`rounded-full border px-3 py-1 text-xs font-medium ${
+                    followLabel === option ? 'border-primary bg-primary text-primary-foreground' : 'border-border hover:bg-accent'
+                  }`}
+                >
+                  {option === 'all' ? 'All follow-up labels' : option}
+                </button>
+              ))}
+            </div>
+          </div>
+          <LabelFollowUpTable
+            key={followLabel}
+            labels={followLabel === 'all' ? [...FOLLOW_UP_LABELS] : [followLabel]}
+            title={followLabel === 'all' ? 'Conversations with follow-up labels (FU, FU-LT, FU-Offer, Lead-FU)' : `${followLabel} conversations`}
+            emptyDescription={
+              followLabel === 'all' ? 'No conversations carry a follow-up label in the synced data.' : `No conversations have the ${followLabel} label in the synced data.`
+            }
           />
         </div>
       )}

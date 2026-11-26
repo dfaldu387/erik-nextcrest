@@ -80,3 +80,11 @@
     animation-duration: 0ms !important;
   }
 }
+
+/* Tab rows that overflow scroll by swipe or drag; the scrollbar is hidden so no arrows show in the page. */
+[role="tablist"] {
+  scrollbar-width: none;
+}
+[role="tablist"]::-webkit-scrollbar {
+  display: none;
+}
