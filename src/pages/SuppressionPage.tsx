@@ -3,7 +3,7 @@ import { useMemo, useState } from 'react';
 import { DataTable } from '@/components/ui/DataTable';
 import { PageHeader } from '@/components/ui/PageHeader';
 import { EmptyState, ErrorState } from '@/components/ui/States';
-import { useRecordsQuery } from '@/hooks/useNextCrestData';
+import { useScopedRecords } from '@/hooks/useNextCrestData';
 import type { LandRecord, MarketingStatus } from '@/data/types';
 import { downloadCsv, toCsv } from '@/lib/csv';
 import { daysSince, formatDate } from '@/lib/format';
@@ -18,7 +18,7 @@ interface SuppressionPageProps {
 const NOT_RECORDED = 'Not recorded';
 
 export function SuppressionPage({ status, title, description, note }: SuppressionPageProps) {
-  const { data, isPending, isError, refetch } = useRecordsQuery();
+  const { data, isPending, isError, refetch } = useScopedRecords();
   const [search, setSearch] = useState('');
 
   const rows = useMemo(() => {

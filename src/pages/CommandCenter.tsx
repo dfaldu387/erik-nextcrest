@@ -1,14 +1,19 @@
 import { useQuery } from '@tanstack/react-query';
-import { ArrowRight, Ban, CalendarClock, CheckCircle2, Database, Download, Filter, MoreHorizontal, PhoneOff, RefreshCw, Search, Send, ShieldCheck, Sprout, Upload, type LucideIcon } from 'lucide-react';
+import { AlertTriangle, ArrowRight, Ban, CalendarClock, CheckCircle2, Database, Download, Filter, MoreHorizontal, PhoneOff, RefreshCw, Search, Send, Settings, ShieldCheck, Sprout, Upload, type LucideIcon } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { Bar, BarChart, CartesianGrid, Cell, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { Link } from 'react-router-dom';
 import { EmptyState, ErrorState, Skeleton } from '@/components/ui/States';
-import { useActivityQuery, useDashboardSummaryQuery, useLeadGroupsQuery, useMarketingSplitQuery } from '@/hooks/useNextCrestData';
+import { useActivityQuery, useDashboardSummaryQuery, useInboxCountsQuery, useLeadGroupsQuery, useMarketingSplitQuery } from '@/hooks/useNextCrestData';
+import { useAccountScope } from '@/lib/accountScope';
 import { greeting } from '@/lib/greeting';
+import { DASHBOARD_STALE_MS } from '@/lib/queryClient';
 import { daysSince, formatCount, formatDate, formatTime } from '@/lib/format';
 import type { LandRecord } from '@/data/types';
 import { listImportBatches, searchProperties } from '@/services/nextcrestData';
+import { countScheduledFollowUps, isRecentlyTexted, listOpenAlerts, listScheduledFollowUps } from '@/services/followUpEngine';
+import { useTouchSummariesQuery } from '@/hooks/useNextCrestData';
+import { daysUntil, formatScheduleDate, localDateKey } from '@/lib/followUpSchedule';
 import type { DashboardSummary } from '@/services/nextcrestData';
 
 const PANEL = 'card flex min-w-0 flex-col gap-4 p-5';
@@ -39,15 +44,28 @@ export function CommandCenter() {
   const leadQuery = useLeadGroupsQuery();
   const splitQuery = useMarketingSplitQuery();
   const activity = useActivityQuery();
-  const imports = useQuery({ queryKey: ['import-batches'], queryFn: () => listImportBatches(4) });
+  const imports = useQuery({ queryKey: ['import-batches'], queryFn: () => listImportBatches(4), staleTime: DASHBOARD_STALE_MS });
+  const touches = useTouchSummariesQuery();
+  // The account chosen in the top bar. SmarterContact numbers and property lists follow it; land totals and lead groups are shared.
+  const { accountId, accounts } = useAccountScope();
+  const accountLabel = accounts.find((a) => a.id === accountId)?.label ?? '';
   const followUps = useQuery({
-    queryKey: ['dashboard-followups'],
-    queryFn: () => searchProperties({ search: '', status: 'followup_due', state: '', county: '', sort: 'last', dir: 'asc', page: 1, pageSize: 6 }),
+    queryKey: ['dashboard-followups', accountId],
+    queryFn: () => searchProperties({ search: '', status: 'followup_due', state: '', county: '', sort: 'last', dir: 'asc', page: 1, pageSize: 6, accountId }),
+    staleTime: DASHBOARD_STALE_MS,
   });
+  // Properties texted in the last 8 days are in the automatic campaign, so they are not shown for a manual follow-up.
+  const dueRows = (followUps.data?.rows ?? []).filter((r) => !isRecentlyTexted(touches.data?.[r.id]?.lastOutgoingAt));
   const recent = useQuery({
-    queryKey: ['dashboard-recent-contacts'],
-    queryFn: () => searchProperties({ search: '', status: '', state: '', county: '', sort: 'last', dir: 'desc', page: 1, pageSize: 4 }),
+    queryKey: ['dashboard-recent-contacts', accountId],
+    queryFn: () => searchProperties({ search: '', status: '', state: '', county: '', sort: 'last', dir: 'desc', page: 1, pageSize: 4, accountId }),
+    staleTime: DASHBOARD_STALE_MS,
   });
+  const alerts = useQuery({ queryKey: ['app-alerts'], queryFn: listOpenAlerts });
+  const scheduleCounts = useQuery({ queryKey: ['follow-up-schedule-counts'], queryFn: countScheduledFollowUps });
+  const dueFollowUps = useQuery({ queryKey: ['follow-up-schedule-due'], queryFn: () => listScheduledFollowUps('due', 6) });
+  const upcomingFollowUps = useQuery({ queryKey: ['follow-up-schedule-upcoming'], queryFn: () => listScheduledFollowUps('upcoming', 6) });
+  const inboxCounts = useInboxCountsQuery(accountId);
 
   if (summaryQuery.isPending) {
     return (
@@ -142,9 +160,90 @@ export function CommandCenter() {
     <div className="space-y-6">
       <Header onRefresh={() => summaryQuery.refetch()} refreshing={summaryQuery.isFetching} />
 
+      {(alerts.data ?? []).map((alert) => (
+        <div key={alert.id} role="alert" className="flex flex-wrap items-center justify-between gap-3 rounded-[12px] border border-amber-400 bg-amber-50 px-4 py-3 text-[13px] text-amber-900 dark:bg-amber-950 dark:text-amber-200">
+          <span className="flex items-center gap-2">
+            <AlertTriangle size={16} aria-hidden="true" />
+            {alert.message}
+          </span>
+          <Link to="/lists" className="font-semibold underline">Open exports</Link>
+        </div>
+      ))}
+
+      {/* All-accounts figures. Hidden when one account is chosen, so only that account's data shows. */}
+      {/* Scheduled follow-ups: dated by "Follow Up On", due on the day or earlier */}
+      {!accountId && (
+      <section aria-labelledby="scheduled-heading" className={PANEL}>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 id="scheduled-heading" className={TITLE}>Scheduled follow-ups</h2>
+            <p className={SUB}>
+              {formatCount(scheduleCounts.data?.due ?? 0)} due today or earlier · {formatCount(scheduleCounts.data?.upcoming ?? 0)} in the next 7 days
+            </p>
+          </div>
+        </div>
+        {dueFollowUps.isError || upcomingFollowUps.isError ? (
+          <ErrorState message="Scheduled follow-ups could not be loaded." onRetry={() => { dueFollowUps.refetch(); upcomingFollowUps.refetch(); }} />
+        ) : (dueFollowUps.data ?? []).length + (upcomingFollowUps.data ?? []).length === 0 ? (
+          <EmptyState title="Nothing scheduled" description="Set a follow-up date on a property and it appears here when it is due." />
+        ) : (
+          <div className="grid gap-4 md:grid-cols-2">
+            {[
+              { label: 'Due', rows: dueFollowUps.data ?? [] },
+              { label: 'Upcoming', rows: upcomingFollowUps.data ?? [] },
+            ].map((group) => (
+              <div key={group.label} className="space-y-2">
+                <h3 className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{group.label}</h3>
+                {group.rows.length === 0 ? (
+                  <p className="text-[12px] text-muted-foreground">None</p>
+                ) : (
+                  <ul className="divide-y divide-border">
+                    {group.rows.map((row) => {
+                      const days = daysUntil(row.followUpOn, localDateKey());
+                      return (
+                        <li key={row.propertyId} className="flex items-center justify-between gap-3 py-2 text-[13px]">
+                          <span className="min-w-0 truncate">
+                            <Link to={`/properties/${row.propertyId}`} className="font-medium hover:underline">{row.ownerName || '—'}</Link>
+                            <span className="text-muted-foreground"> · {row.county}, {row.state}</span>
+                          </span>
+                          <span className={`shrink-0 text-[12px] ${days < 0 ? 'font-semibold text-red-600' : 'text-muted-foreground'}`}>
+                            {days === 0 ? 'Today' : days < 0 ? `${-days} day${days === -1 ? '' : 's'} overdue` : formatScheduleDate(row.followUpOn)}
+                          </span>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+      )}
+
+      {/* The selected SmarterContact account's conversations. Shown only when one account is chosen in the top bar. */}
+      {accountId && (
+        <section aria-label={`SmarterContact conversations for ${accountLabel}`} className="space-y-3">
+          <div>
+            <h2 className="text-base font-semibold">SmarterContact · {accountLabel}</h2>
+            <p className="text-xs text-muted-foreground">Conversations in this account only. Change the account in the top bar.</p>
+          </div>
+          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+            <KpiCard title="All conversations" value={formatCount(inboxCounts.data?.all ?? 0)} caption="Every conversation in this account" icon={Send} tone="purple" to="/inbox" />
+            <KpiCard title="Unread" value={formatCount(inboxCounts.data?.unread ?? 0)} caption="Not opened yet" icon={Send} tone="blue" to="/inbox" />
+            <KpiCard title="Awaiting reply" value={formatCount(inboxCounts.data?.awaiting_reply ?? 0)} caption="Waiting for the contact to answer" icon={CalendarClock} tone="orange" to="/inbox" />
+            <KpiCard title="Unreplied" value={formatCount(inboxCounts.data?.unreplied ?? 0)} caption="The contact wrote and nobody replied" icon={Send} tone="orange" to="/inbox" />
+            <KpiCard title="Missed calls" value={formatCount(inboxCounts.data?.missed_calls ?? 0)} caption="Calls that were not answered" icon={PhoneOff} tone="blue" to="/inbox" />
+            <KpiCard title="Opted out" value={formatCount(inboxCounts.data?.opted_out ?? 0)} caption="Asked not to be texted" icon={Ban} tone="purple" to="/inbox" />
+          </div>
+        </section>
+      )}
+
+      {!accountId && (
+      <>
       {/* Row 1: four equal KPI cards */}
       <section aria-label="Key numbers" className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <KpiCard title="Total properties" value={formatCount(s.total)} caption={`Last loaded ${formatTime(loadedAt)}`} icon={Database} tone="purple" to="/properties" />
+        <KpiCard title="Total properties" value={formatCount(s.total)} caption={accountId ? 'All land records, all accounts' : `Last loaded ${formatTime(loadedAt)}`} icon={Database} tone="purple" to="/properties" />
         <KpiCard title="Never marketed" value={formatCount(s.never_marketed)} caption={`${pct(s.never_marketed)} of properties`} icon={Sprout} tone="blue" to="/properties?status=never_marketed" />
         <KpiCard title="Follow-up due" value={formatCount(s.followup_due)} caption={`${pct(s.followup_due)} of properties`} icon={CalendarClock} tone="orange" to="/followups" />
         <KpiCard title="Responded" value={formatCount(s.responded)} caption={`${pct(s.responded)} of properties`} icon={CheckCircle2} tone="green" to="/responders" />
@@ -154,7 +253,9 @@ export function CommandCenter() {
       <section aria-label="Lead groups" className="space-y-3">
         <div>
           <h2 className="text-base font-semibold">Responders and lead groups</h2>
-          <p className="text-xs text-muted-foreground">From SmarterContact labels. Follow-up dates are not available yet, so scheduled follow-ups come from the follow-up labels.</p>
+          <p className="text-xs text-muted-foreground">
+            From SmarterContact labels. Follow-up dates are not available yet, so scheduled follow-ups come from the follow-up labels.
+          </p>
         </div>
         <div className="grid gap-4 sm:grid-cols-3">
           <KpiCard title="Nurture" value={formatCount(leadQuery.data?.nurture ?? 0)} caption="Positive responses that need comping" icon={Sprout} tone="green" to="/responders" />
@@ -371,13 +472,16 @@ export function CommandCenter() {
               <Link to="/lists" className="inline-flex h-8 items-center gap-1.5 rounded-[10px] border border-border px-2.5 text-[12px] font-medium hover:bg-muted">
                 <Download size={13} aria-hidden="true" /> Export
               </Link>
+              <Link to="/settings" className="inline-flex h-8 items-center gap-1.5 rounded-[10px] border border-border px-2.5 text-[12px] font-medium hover:bg-muted">
+                <Settings size={13} aria-hidden="true" /> Marketing settings
+              </Link>
             </div>
           </div>
           {followUps.isPending ? (
             <Skeleton className="h-40 w-full" />
           ) : followUps.isError ? (
             <ErrorState message="The follow-up queue could not be loaded." onRetry={() => followUps.refetch()} />
-          ) : (followUps.data?.rows ?? []).length === 0 ? (
+          ) : dueRows.length === 0 ? (
             <EmptyState tone="success" title="All caught up" description="No follow-ups are due right now." />
           ) : (
             <div className="overflow-x-auto">
@@ -394,7 +498,7 @@ export function CommandCenter() {
                   </tr>
                 </thead>
                 <tbody>
-                  {(followUps.data?.rows ?? []).map((r) => (
+                  {dueRows.map((r) => (
                     <tr key={r.id} className="border-b border-border last:border-0 transition-colors hover:bg-muted/60">
                       <td className="py-2.5 pr-3">
                         <div className="flex items-center gap-2.5">
@@ -529,6 +633,8 @@ export function CommandCenter() {
           )}
         </section>
       </div>
+      </>
+      )}
     </div>
   );
 }

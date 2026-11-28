@@ -49,7 +49,17 @@ export function useAuth(): AuthState {
 export async function signInWithPassword(email: string, password: string): Promise<string | null> {
   if (!supabase) return 'Sign-in is not configured.';
   const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
-  return error ? friendlyError(error.message) : null;
+  if (!error) return null;
+  // Timeouts and gateway errors come back as retryable errors, not as a wrong-password message.
+  if (isServerTimeout(error)) return 'The sign-in service is slow to respond right now. Wait a moment and try again.';
+  return friendlyError(error.message);
+}
+
+// supabase-js marks network and gateway failures (504, 502, 503, dropped connections) as retryable.
+function isServerTimeout(error: { name?: string; status?: number; message?: string }): boolean {
+  if (error.name === 'AuthRetryableFetchError') return true;
+  if (error.status !== undefined && [502, 503, 504].includes(error.status)) return true;
+  return /timeout|timed out|gateway/i.test(error.message ?? '');
 }
 
 export async function signOut(): Promise<void> {

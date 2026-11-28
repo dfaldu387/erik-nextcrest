@@ -63,16 +63,16 @@ export function Integrations() {
   const landPortal = useQuery({
     queryKey: ['integration-landportal'],
     queryFn: checkLandPortal,
-    staleTime: 60_000,
-    refetchInterval: 60_000,
+    staleTime: 5 * 60_000,
+    refetchInterval: 5 * 60_000,
     retry: false,
   });
 
   const database = useQuery({
     queryKey: ['database-status'],
     queryFn: checkDatabase,
-    staleTime: 60_000,
-    refetchInterval: 60_000,
+    staleTime: 5 * 60_000,
+    refetchInterval: 5 * 60_000,
     retry: false,
   });
 

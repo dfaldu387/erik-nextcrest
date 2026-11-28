@@ -10,7 +10,18 @@ export interface InboxFilters {
   responseFrom: string; // YYYY-MM-DD, '' when not set
   responseTo: string; // YYYY-MM-DD, '' when not set
   areaCodes: string[];
+  propertyMatch: PropertyMatch;
+  minProperties: number; // 0 means any number of properties
 }
+
+// Whether the conversation is linked to a property in the imported records.
+export type PropertyMatch = 'any' | 'matched' | 'unmatched';
+
+export const PROPERTY_MATCH_OPTIONS: { value: PropertyMatch; label: string }[] = [
+  { value: 'any', label: 'Any' },
+  { value: 'matched', label: 'Matched to a property' },
+  { value: 'unmatched', label: 'Not matched' },
+];
 
 export const EMPTY_INBOX_FILTERS: InboxFilters = {
   includeLabels: [],
@@ -20,6 +31,8 @@ export const EMPTY_INBOX_FILTERS: InboxFilters = {
   responseFrom: '',
   responseTo: '',
   areaCodes: [],
+  propertyMatch: 'any',
+  minProperties: 0,
 };
 
 export type DatePreset = 'today' | 'last_week' | 'this_month' | 'last_month' | 'last_30_days' | 'last_year';
@@ -89,6 +102,7 @@ export function countActiveFilters(filters: InboxFilters): number {
   if (filters.excludeLabels.length) count += 1;
   if (filters.responseFrom || filters.responseTo) count += 1;
   if (filters.areaCodes.length) count += 1;
+  if (filters.propertyMatch !== 'any' || filters.minProperties > 0) count += 1;
   return count;
 }
 

@@ -4,7 +4,7 @@ import type { ReactElement, ReactNode } from 'react';
 import { Bar, BarChart, CartesianGrid, Cell, Legend, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { PageHeader } from '@/components/ui/PageHeader';
 import { CardSkeleton, EmptyState, ErrorState } from '@/components/ui/States';
-import { useRecordsQuery } from '@/hooks/useNextCrestData';
+import { useScopedRecords } from '@/hooks/useNextCrestData';
 import type { MarketingStatus } from '@/data/types';
 import { downloadCsv, toCsv } from '@/lib/csv';
 import { formatCount } from '@/lib/format';
@@ -32,7 +32,7 @@ const ACRE_BUCKETS = [
 const tooltipStyle = { borderRadius: 8, fontSize: 12 };
 
 export function Reports() {
-  const { data, isPending, isError, refetch } = useRecordsQuery();
+  const { data, isPending, isError, refetch } = useScopedRecords();
   const records = useMemo(() => data?.data ?? [], [data]);
 
   const byCounty = useMemo(() => {

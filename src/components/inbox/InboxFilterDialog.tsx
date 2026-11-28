@@ -2,7 +2,7 @@ import { ChevronDown, ChevronUp, X } from 'lucide-react';
 import { useEffect, useState, type ReactNode } from 'react';
 import { DateRangePicker } from '@/components/inbox/DateRangePicker';
 import { SearchableMultiSelect } from '@/components/ui/SearchableMultiSelect';
-import { dateRangeError, type InboxFilters, type MatchMode } from '@/lib/inboxFilters';
+import { dateRangeError, PROPERTY_MATCH_OPTIONS, type InboxFilters, type MatchMode } from '@/lib/inboxFilters';
 
 interface InboxFilterDialogProps {
   value: InboxFilters;
@@ -14,7 +14,7 @@ interface InboxFilterDialogProps {
 
 const NOT_SHARED = 'SmarterContact does not share this through the connector yet.';
 
-type SectionKey = 'labels' | 'responseDate' | 'areaCode' | 'campaigns' | 'groups';
+type SectionKey = 'labels' | 'responseDate' | 'areaCode' | 'property' | 'campaigns' | 'groups';
 
 // A collapsible section with a chevron, as in SmarterContact.
 function Accordion({
@@ -91,6 +91,7 @@ export function InboxFilterDialog({ value, labelOptions, areaCodeOptions, onAppl
     labels: true,
     responseDate: true,
     areaCode: false,
+    property: false,
     campaigns: false,
     groups: false,
   });
@@ -173,6 +174,33 @@ export function InboxFilterDialog({ value, labelOptions, areaCodeOptions, onAppl
             />
           </Accordion>
 
+          <Accordion title="Property match" open={open.property} onToggle={() => toggle('property')}>
+            <select
+              aria-label="Property match"
+              value={draft.propertyMatch}
+              onChange={(e) => set('propertyMatch', e.target.value as InboxFilters['propertyMatch'])}
+              className="field w-full"
+            >
+              {PROPERTY_MATCH_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+            </select>
+            <label className="mt-3 flex items-center gap-2 text-sm">
+              <span className="whitespace-nowrap">At least</span>
+              <input
+                type="number"
+                min={0}
+                max={999}
+                aria-label="Minimum number of properties"
+                value={draft.minProperties}
+                onChange={(e) => set('minProperties', Math.max(0, Math.min(999, Math.floor(Number(e.target.value) || 0))))}
+                className="field w-24"
+              />
+              <span className="text-muted-foreground">properties (0 = any)</span>
+            </label>
+            <p className="text-xs text-muted-foreground">Matched means the conversation's phone, APN or owner is on an imported property.</p>
+          </Accordion>
+
           <Accordion title="Campaigns" open={open.campaigns} onToggle={() => toggle('campaigns')}>
             <SearchableMultiSelect ariaLabel="Campaigns" placeholder="Select campaigns" options={[]} value={[]} onChange={() => undefined} searchIcon disabled />
             <p className="text-xs text-muted-foreground">Campaign names are not available from SmarterContact yet.</p>
@@ -201,6 +229,8 @@ export function InboxFilterDialog({ value, labelOptions, areaCodeOptions, onAppl
                 responseFrom: '',
                 responseTo: '',
                 areaCodes: [],
+                propertyMatch: 'any',
+                minProperties: 0,
               })
             }
           >

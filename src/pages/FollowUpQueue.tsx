@@ -6,8 +6,10 @@ import { PageHeader } from '@/components/ui/PageHeader';
 import { ProgressBar } from '@/components/ui/ProgressBar';
 import { EmptyState, ErrorState } from '@/components/ui/States';
 import { StatusChip } from '@/components/ui/StatusChip';
-import { useInboxCountsQuery, useInboxQuery, usePropertySummariesQuery, useRecordsQuery, useSuppressedPhonesQuery } from '@/hooks/useNextCrestData';
+import { useInboxCountsQuery, useInboxQuery, usePropertySummariesQuery, useScopedRecords, useSuppressedPhonesQuery, useTouchSummariesQuery } from '@/hooks/useNextCrestData';
+import { isRecentlyTexted } from '@/services/followUpEngine';
 import { EMPTY_INBOX_FILTERS } from '@/lib/inboxFilters';
+import { useAccountScope } from '@/lib/accountScope';
 import { exportInbox, type InboxFolderKey, type InboxRecord } from '@/services/nextcrestData';
 import type { LandRecord } from '@/data/types';
 import { daysSince, formatAcres, formatDate } from '@/lib/format';
@@ -63,6 +65,7 @@ function isTab(value: string | null): value is TabKey {
 function LabelFollowUpTable({ labels, title, emptyDescription }: { labels: string[]; title: string; emptyDescription: string }) {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(25);
+  const { accountId } = useAccountScope();
   const { data, isPending, isError, refetch } = useInboxQuery({
     folder: 'all',
     search: '',
@@ -71,6 +74,7 @@ function LabelFollowUpTable({ labels, title, emptyDescription }: { labels: strin
     sortDir: 'desc',
     page,
     pageSize,
+    accountId,
   });
   const rows = data?.rows ?? [];
   const propertyIds = rows.map((r) => r.propertyId).filter((id): id is string => !!id);
@@ -219,6 +223,7 @@ function InboxListTable({
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
   const listFilters = labels ? { ...EMPTY_INBOX_FILTERS, includeLabels: labels, includeMode: 'any' as const } : EMPTY_INBOX_FILTERS;
+  const { accountId } = useAccountScope();
   const { data, isPending, isError, refetch } = useInboxQuery({
     folder,
     search: '',
@@ -227,6 +232,7 @@ function InboxListTable({
     sortDir: 'desc',
     page,
     pageSize,
+    accountId,
   });
   const rows = data?.rows ?? [];
 
@@ -331,20 +337,26 @@ function InboxListTable({
 }
 
 export function FollowUpQueue() {
-  const { data, isPending, isError, refetch } = useRecordsQuery();
+  const { data, isPending, isError, refetch } = useScopedRecords();
   const [params, setParams] = useSearchParams();
   const requested = params.get('tab');
   const tab: TabKey = isTab(requested) ? requested : 'today';
   const [done, setDone] = useState<Set<string>>(() => new Set());
-  const counts = useInboxCountsQuery();
+  const { accountId } = useAccountScope();
+  const counts = useInboxCountsQuery(accountId);
   // The label filter on Follow up today: "all" or one follow-up label.
   const [followLabel, setFollowLabel] = useState<'all' | (typeof FOLLOW_UP_LABELS)[number]>('all');
   const awaiting = tab === 'awaiting';
 
   const activeTab = TABS.find((t) => t.key === tab)!;
+  const touches = useTouchSummariesQuery();
+  // "Follow up today" leaves out properties we texted in the last 8 days: the automatic campaign already covers them.
   const queue = useMemo(
-    () => (data?.data ?? []).filter(activeTab.matches),
-    [data, activeTab],
+    () =>
+      (data?.data ?? []).filter(
+        (r) => activeTab.matches(r) && !(tab === 'today' && isRecentlyTexted(touches.data?.[r.id]?.lastOutgoingAt)),
+      ),
+    [data, activeTab, tab, touches.data],
   );
   const doneInQueue = queue.filter((r) => done.has(r.id)).length;
   const progress = queue.length ? Math.round((doneInQueue / queue.length) * 100) : 0;

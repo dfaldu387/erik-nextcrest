@@ -3,8 +3,10 @@ import { Bell, CheckSquare, Menu, Monitor, Moon, Plus, Search, Sun } from 'lucid
 import { useState } from 'react';
 import type { FormEvent } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { AccountSwitch } from '@/components/layout/AccountSwitch';
 import { DataFreshness } from '@/components/ui/DataFreshness';
 import { useAuth, signOut } from '@/lib/auth';
+import { DASHBOARD_STALE_MS } from '@/lib/queryClient';
 import { applyTheme, getStoredTheme, nextTheme, setStoredTheme } from '@/lib/theme';
 import type { ThemeMode } from '@/lib/theme';
 import { getDashboardSummary } from '@/services/nextcrestData';
@@ -26,7 +28,7 @@ export function Navbar({ onOpenMenu }: NavbarProps) {
   const auth = useAuth();
 
   // Alerts: follow-ups due, from the same database summary the Overview uses.
-  const alerts = useQuery({ queryKey: ['dashboard-summary'], queryFn: getDashboardSummary, staleTime: 60_000 });
+  const alerts = useQuery({ queryKey: ['dashboard-summary'], queryFn: getDashboardSummary, staleTime: DASHBOARD_STALE_MS });
   const alertCount = alerts.data ? alerts.data.followup_due + alerts.data.wrong_number : 0;
 
   const initial = auth.status === 'signed-in' ? (auth.session.user.email ?? 'U').charAt(0).toUpperCase() : 'N';
@@ -49,6 +51,8 @@ export function Navbar({ onOpenMenu }: NavbarProps) {
       <button type="button" onClick={onOpenMenu} className="btn-ghost h-9 w-9 p-0 lg:hidden" aria-label="Open navigation">
         <Menu size={20} aria-hidden="true" />
       </button>
+
+      <AccountSwitch />
 
       <form onSubmit={onSearch} role="search" className="relative max-w-xl flex-1">
         <Search size={16} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />

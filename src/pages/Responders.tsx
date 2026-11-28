@@ -4,14 +4,14 @@ import { DataTable } from '@/components/ui/DataTable';
 import { PageHeader } from '@/components/ui/PageHeader';
 import { EmptyState, ErrorState } from '@/components/ui/States';
 import { StatusChip } from '@/components/ui/StatusChip';
-import { useRecordsQuery } from '@/hooks/useNextCrestData';
+import { useScopedRecords } from '@/hooks/useNextCrestData';
 import type { LandRecord } from '@/data/types';
 import { daysSince, formatDate } from '@/lib/format';
 
 const NOT_RECORDED = 'Not recorded';
 
 export function Responders() {
-  const { data, isPending, isError, refetch } = useRecordsQuery();
+  const { data, isPending, isError, refetch } = useScopedRecords();
   const [search, setSearch] = useState('');
 
   const rows = useMemo(() => {

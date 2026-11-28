@@ -1,5 +1,6 @@
 import { QueryClientProvider } from '@tanstack/react-query';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
+import { AccountScopeProvider } from '@/lib/accountScope';
 import { Layout } from '@/components/layout/Layout';
 import { queryClient } from '@/lib/queryClient';
 import { RequireAuth } from '@/components/auth/RequireAuth';
@@ -19,6 +20,7 @@ import { Lists } from '@/pages/Lists';
 import { NotFound } from '@/pages/NotFound';
 import { PropertyDetail } from '@/pages/PropertyDetail';
 import { Records } from '@/pages/Records';
+import { AllAccountsOnly } from '@/components/layout/AllAccountsOnly';
 import { Reports } from '@/pages/Reports';
 import { Responders } from '@/pages/Responders';
 import { Settings } from '@/pages/Settings';
@@ -28,7 +30,7 @@ import { Team } from '@/pages/Team';
 function App() {
   return (
     <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
+      <AccountScopeProvider><BrowserRouter>
         <Routes>
           <Route path="/sign-in" element={<SignIn />} />
           <Route
@@ -42,11 +44,11 @@ function App() {
             <Route path="/dashboard" element={<CommandCenter />} />
             <Route path="/properties" element={<Records />} />
             <Route path="/properties/:id" element={<PropertyDetail />} />
-            <Route path="/purchases" element={<DataPurchases />} />
-            <Route path="/purchases/:id" element={<DataPurchaseDetail />} />
-            <Route path="/check-before-buying" element={<CheckBeforeBuying />} />
-            <Route path="/search-buy" element={<SearchAndBuy />} />
-            <Route path="/duplicates" element={<DuplicateChecker />} />
+            <Route path="/purchases" element={<AllAccountsOnly name="Data Purchases"><DataPurchases /></AllAccountsOnly>} />
+            <Route path="/purchases/:id" element={<AllAccountsOnly name="Data Purchases"><DataPurchaseDetail /></AllAccountsOnly>} />
+            <Route path="/check-before-buying" element={<AllAccountsOnly name="Check Before Buying"><CheckBeforeBuying /></AllAccountsOnly>} />
+            <Route path="/search-buy" element={<AllAccountsOnly name="Search &amp; Buy"><SearchAndBuy /></AllAccountsOnly>} />
+            <Route path="/duplicates" element={<AllAccountsOnly name="Duplicate Checker"><DuplicateChecker /></AllAccountsOnly>} />
             <Route path="/lists" element={<Lists />} />
             <Route path="/campaigns" element={<Campaigns />} />
             <Route path="/followups" element={<FollowUpQueue />} />
@@ -74,7 +76,7 @@ function App() {
                 />
               }
             />
-            <Route path="/import-export" element={<ImportExport />} />
+            <Route path="/import-export" element={<AllAccountsOnly name="Import and Export"><ImportExport /></AllAccountsOnly>} />
             <Route path="/integrations" element={<Integrations />} />
             <Route path="/reports" element={<Reports />} />
             <Route path="/team" element={<Team />} />
@@ -84,7 +86,7 @@ function App() {
             <Route path="*" element={<NotFound />} />
           </Route>
         </Routes>
-      </BrowserRouter>
+      </BrowserRouter></AccountScopeProvider>
     </QueryClientProvider>
   );
 }

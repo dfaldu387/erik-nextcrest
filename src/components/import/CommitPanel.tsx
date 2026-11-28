@@ -1,8 +1,8 @@
-import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Save } from 'lucide-react';
 import { useState } from 'react';
 import { toRawCsv } from '@/lib/csv';
 import { buildCommitPhones, buildCommitRows, countsFrom } from '@/lib/importCommit';
+import { useImportJob } from '@/lib/importJobs';
 import { commitImport } from '@/services/nextcrestData';
 import { formatCount } from '@/lib/format';
 import type { BatchFile, BatchSummary, ReviewRow } from '@/lib/importReview';
@@ -13,7 +13,6 @@ function todayIso(): string {
   return new Date(now.getTime() - offset).toISOString().slice(0, 10);
 }
 
-
 interface CommitPanelProps {
   files: BatchFile[];
   reviewed: ReviewRow[];
@@ -22,15 +21,20 @@ interface CommitPanelProps {
 }
 
 // Saves the new properties from the review to the database, and records the batch.
+// The save runs in the background: the progress bar across the top of the app shows it, and the page can be left.
 export function CommitPanel({ files, reviewed, summary, filename }: CommitPanelProps) {
-  const queryClient = useQueryClient();
+  const { state, start } = useImportJob();
   const [purchaseDate, setPurchaseDate] = useState(todayIso);
-  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
+  const [started, setStarted] = useState(false);
   const counts = countsFrom(summary, reviewed);
   const dateValid = /^\d{4}-\d{2}-\d{2}$/.test(purchaseDate);
 
-  const save = useMutation({
-    mutationFn: () =>
+  const anyRunning = state.status === 'running';
+  const thisBatchRunning = anyRunning && state.label === filename;
+  const saved = started && state.status === 'done' && state.label === filename;
+
+  const save = () => {
+    const accepted = start(filename, counts.newRows, (onProgress) =>
       commitImport({
         filename,
         purchaseDate,
@@ -38,15 +42,11 @@ export function CommitPanel({ files, reviewed, summary, filename }: CommitPanelP
         buildRows: (batchId) => buildCommitRows(files, reviewed, purchaseDate, batchId),
         phones: buildCommitPhones(files, reviewed),
         sourceFiles: files.map((f) => ({ name: f.name, csv: toRawCsv(f.table) })),
-        onProgress: (done, total) => setProgress({ done, total }),
+        onProgress,
       }),
-    onSettled: () => {
-      setProgress(null);
-      void queryClient.invalidateQueries({ queryKey: ['import-batches'] });
-      void queryClient.invalidateQueries({ queryKey: ['records'] });
-      void queryClient.invalidateQueries({ queryKey: ['properties'] });
-    },
-  });
+    );
+    if (accepted) setStarted(true);
+  };
 
   return (
     <section aria-labelledby="save-heading" className="card space-y-4 p-5">
@@ -93,41 +93,22 @@ export function CommitPanel({ files, reviewed, summary, filename }: CommitPanelP
           <button
             type="button"
             className="btn-primary h-10"
-            onClick={() => save.mutate()}
-            disabled={!dateValid || counts.newRows === 0 || save.isPending || save.isSuccess}
+            onClick={save}
+            disabled={!dateValid || counts.newRows === 0 || anyRunning || saved}
           >
-            <Save size={16} aria-hidden="true" /> Save {formatCount(counts.newRows)} new properties
+            <Save size={16} aria-hidden="true" />{' '}
+            {thisBatchRunning ? 'Saving in background…' : saved ? 'Saved' : `Save ${formatCount(counts.newRows)} new properties`}
           </button>
-          <span className="text-xs text-muted-foreground">Saved rows are kept. The import history records every run.</span>
+          <span className="text-xs text-muted-foreground">
+            Runs in the background, with progress shown across the top of the screen. Keep this tab open until it finishes.
+          </span>
         </div>
       </div>
 
-      {progress && (
-        <p className="text-sm" aria-live="polite">
-          Saving… {formatCount(progress.done)} of {formatCount(progress.total)}
+      {saved && state.status === 'done' && (
+        <p role="status" className="text-sm text-green-800 dark:text-green-200">
+          Saved {formatCount(state.result.committed)} properties. The batch is in the import history below.
         </p>
-      )}
-
-      {save.isError && (
-        <p role="alert" className="text-sm text-red-700 dark:text-red-300">
-          {save.error instanceof Error ? save.error.message : 'The import could not be saved.'}
-        </p>
-      )}
-
-      {save.isSuccess && (
-        <div role="status" className="rounded-md border border-green-300 bg-green-50 px-4 py-3 text-sm text-green-900 dark:border-green-800 dark:bg-green-950 dark:text-green-200">
-          Saved {formatCount(save.data.committed)} properties.
-          {save.data.failed > 0 && (
-            <>
-              {' '}
-              {formatCount(save.data.failed)} rows could not be saved
-              {save.data.firstError ? `: ${save.data.firstError}` : '.'}
-            </>
-          )}{' '}
-          {save.data.phonesLinked > 0 && <> {formatCount(save.data.phonesLinked)} phone links saved. {formatCount(save.data.dncNumbers)} numbers marked Do Not Call. Exports do not check this flag yet.</>}
-          {save.data.phoneError && <> Phone numbers could not be saved: {save.data.phoneError}</>}
-          The batch is in the import history below.
-        </div>
       )}
     </section>
   );

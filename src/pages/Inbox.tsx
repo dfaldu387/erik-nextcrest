@@ -1,6 +1,10 @@
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useMemo, useState, type KeyboardEvent } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { ConversationPanel } from '@/components/inbox/ConversationPanel';
+import { LabelPicker } from '@/components/inbox/LabelPicker';
+import { ExportDialog } from '@/components/ui/ExportDialog';
+import { setConversationLabelsLocal } from '@/services/nextcrestData';
 import { InboxFilterDialog } from '@/components/inbox/InboxFilterDialog';
 import { type Column, DataTable, type SortState } from '@/components/ui/DataTable';
 import { PageHeader } from '@/components/ui/PageHeader';
@@ -8,6 +12,7 @@ import { EmptyState, ErrorState } from '@/components/ui/States';
 import { useInboxCountsQuery, useInboxFilterOptionsQuery, useInboxQuery } from '@/hooks/useNextCrestData';
 import { downloadCsv, toCsv } from '@/lib/csv';
 import { formatCount, formatDate, formatTime } from '@/lib/format';
+import { useAccountScope } from '@/lib/accountScope';
 import { EMPTY_INBOX_FILTERS, countActiveFilters, type InboxFilters } from '@/lib/inboxFilters';
 import {
   exportInbox,
@@ -17,7 +22,17 @@ import {
   type InboxSortKey,
 } from '@/services/nextcrestData';
 
-const EXPORT_HEADERS = ['Name', 'Phone', 'Email', 'Last message', 'Last message date', 'Direction', 'Labels', 'Folders', 'Property matched'];
+const EXPORT_COLUMNS: { key: string; label: string; value: (r: InboxRecord) => string }[] = [
+  { key: 'name', label: 'Name', value: (r) => r.name },
+  { key: 'phone', label: 'Phone', value: (r) => formatPhone(r.phone) },
+  { key: 'email', label: 'Email', value: (r) => r.email ?? '' },
+  { key: 'lastMessage', label: 'Last message', value: (r) => r.lastMessage ?? '' },
+  { key: 'lastMessageAt', label: 'Last message date', value: (r) => r.lastMessageAt ?? '' },
+  { key: 'direction', label: 'Direction', value: (r) => r.lastDirection ?? '' },
+  { key: 'labels', label: 'Labels', value: (r) => r.labels.join('; ') },
+  { key: 'folders', label: 'Folders', value: (r) => r.folders.join('; ') },
+  { key: 'property', label: 'Property matched', value: (r) => (r.propertyId ? 'Yes' : 'No') },
+];
 
 // Waits for typing to pause so each keystroke does not send a database request.
 function useDebouncedValue<T>(value: T, delay: number): T {
@@ -82,11 +97,23 @@ export function Inbox() {
   const [openRow, setOpenRow] = useState<InboxRecord | null>(null);
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
+  const [exportOpen, setExportOpen] = useState(false);
   const debouncedSearch = useDebouncedValue(search, 300);
 
-  const counts = useInboxCountsQuery();
+  const { accountId } = useAccountScope();
+  const counts = useInboxCountsQuery(accountId);
   const options = useInboxFilterOptionsQuery();
-  const query = { folder, search: debouncedSearch, filters, sortKey, sortDir, page, pageSize };
+  const queryClient = useQueryClient();
+  const [labelError, setLabelError] = useState<string | null>(null);
+  const saveLabels = useMutation({
+    mutationFn: (v: { contactId: string; labels: string[] }) => setConversationLabelsLocal(v.contactId, v.labels),
+    onMutate: () => setLabelError(null),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['inbox'] });
+    },
+    onError: (e: Error) => setLabelError(e.message),
+  });
+  const query = { folder, search: debouncedSearch, filters, sortKey, sortDir, page, pageSize, accountId };
   const { data, isPending, isError, refetch } = useInboxQuery(query);
 
   const total = data?.total ?? 0;
@@ -142,7 +169,8 @@ export function Inbox() {
     document.getElementById(`inbox-tab-${next.key}`)?.focus();
   };
 
-  const runExport = async () => {
+  // Exports the conversations selected in the table, or every conversation matching the current folder, search and filters.
+  const runExport = async ({ columns }: { columns: string[] }) => {
     setExporting(true);
     setExportError(null);
     try {
@@ -150,19 +178,11 @@ export function Inbox() {
         selected.size > 0
           ? [...selected.values()]
           : await exportInbox({ folder, search: debouncedSearch, filters, sortKey, sortDir });
-      const body = records.map((r) => [
-        r.name,
-        formatPhone(r.phone),
-        r.email,
-        r.lastMessage ?? '',
-        r.lastMessageAt ?? '',
-        r.lastDirection ?? '',
-        r.labels.join('; '),
-        r.folders.join('; '),
-        r.propertyId ? 'Yes' : 'No',
-      ]);
+      const chosen = columns.map((key) => EXPORT_COLUMNS.find((c) => c.key === key)).filter((c): c is (typeof EXPORT_COLUMNS)[number] => !!c);
+      const body = records.map((r) => chosen.map((c) => c.value(r)));
       const stamp = new Date().toISOString().slice(0, 10);
-      downloadCsv(`Inbox_${folder}_${stamp}.csv`, toCsv(EXPORT_HEADERS, body));
+      downloadCsv(`Inbox_${folder}_${stamp}.csv`, toCsv(chosen.map((c) => c.label), body));
+      setExportOpen(false);
     } catch (error) {
       setExportError(error instanceof Error ? error.message : 'Export failed.');
     } finally {
@@ -212,13 +232,13 @@ export function Inbox() {
       key: 'labels',
       header: 'Labels',
       cell: (r) => (
-        <div className="flex flex-wrap gap-1">
-          {r.labels.map((label) => (
-            <span key={label} className="rounded-full bg-accent px-2 py-0.5 text-xs text-accent-foreground">
-              {label}
-            </span>
-          ))}
-        </div>
+        <LabelPicker
+          label={r.name || r.phone || 'this conversation'}
+          labels={r.labels}
+          options={options.data?.labels ?? []}
+          disabled={saveLabels.isPending}
+          onChange={(next) => saveLabels.mutate({ contactId: r.contactId, labels: next })}
+        />
       ),
     },
     {
@@ -302,9 +322,24 @@ export function Inbox() {
           <button type="button" className="btn-secondary h-9 px-3" onClick={() => setFilterOpen(true)}>
             Filters{activeCount > 0 ? ` (${activeCount})` : ''}
           </button>
-          <button type="button" className="btn-secondary h-9 px-3" disabled={exporting || (total === 0 && selected.size === 0)} onClick={runExport}>
+          <button type="button" className="btn-secondary h-9 px-3" disabled={exporting || (total === 0 && selected.size === 0)} onClick={() => setExportOpen(true)}>
             {exporting ? 'Exporting…' : selected.size > 0 ? `Export ${formatCount(selected.size)} selected` : `Export ${formatCount(total)} matching`}
           </button>
+          {exportOpen && (
+            <ExportDialog
+              title="Export conversations"
+              description={
+                selected.size > 0
+                  ? `Exports the ${formatCount(selected.size)} selected conversations.`
+                  : `Exports the ${formatCount(total)} conversations matching the current folder, search and filters.`
+              }
+              columns={EXPORT_COLUMNS.map((c) => ({ key: c.key, label: c.label }))}
+              busy={exporting}
+              error={exportError}
+              onClose={() => setExportOpen(false)}
+              onExport={runExport}
+            />
+          )}
         </div>
 
         {(chips.length > 0 || search) && (
@@ -351,6 +386,12 @@ export function Inbox() {
             }
           />
         ) : (
+          <>
+          {labelError && (
+            <div role="alert" className="mx-4 mt-3 rounded-[12px] border border-red-300 bg-red-50 px-4 py-3 text-[13px] text-red-800 dark:bg-red-950 dark:text-red-200">
+              Labels were not saved: {labelError}
+            </div>
+          )}
           <DataTable<InboxRecord>
             caption="Inbox conversations"
             columns={columns}
@@ -385,6 +426,7 @@ export function Inbox() {
               onClear: () => setSelected(new Map()),
             }}
           />
+          </>
         )}
       </section>
       {openRow && <ConversationPanel key={openRow.contactId} row={openRow} onClose={() => setOpenRow(null)} />}

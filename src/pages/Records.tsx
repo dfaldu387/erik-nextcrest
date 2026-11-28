@@ -1,4 +1,4 @@
-import { X } from 'lucide-react';
+import { Send, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { DataTable } from '@/components/ui/DataTable';
@@ -8,10 +8,44 @@ import { SearchableSelect } from '@/components/ui/SearchableSelect';
 import { SearchableMultiSelect } from '@/components/ui/SearchableMultiSelect';
 import { EmptyState, ErrorState } from '@/components/ui/States';
 import { StatusChip, statusConfig } from '@/components/ui/StatusChip';
-import { usePropertiesQuery, usePropertyFilterOptionsQuery } from '@/hooks/useNextCrestData';
+import { ExportDialog, type ExportColumn } from '@/components/ui/ExportDialog';
+import { usePropertiesQuery, usePropertyFilterOptionsQuery, usePropertyLabelsQuery, useInboxFilterOptionsQuery } from '@/hooks/useNextCrestData';
+import { useAccountScope } from '@/lib/accountScope';
+import { downloadCsv, toCsv } from '@/lib/csv';
 import type { LandRecord, MarketingStatus } from '@/data/types';
 import { daysSince, formatAcres, formatDate } from '@/lib/format';
-import type { PropertySort } from '@/services/nextcrestData';
+import { exportProperties, getPropertyLabels, type PropertySort } from '@/services/nextcrestData';
+
+const PROPERTY_EXPORT_COLUMNS: ExportColumn[] = [
+  { key: 'apn', label: 'APN' },
+  { key: 'owner', label: 'Owner' },
+  { key: 'phone', label: 'Phone' },
+  { key: 'county', label: 'County' },
+  { key: 'state', label: 'State' },
+  { key: 'zip', label: 'ZIP' },
+  { key: 'acres', label: 'Acres' },
+  { key: 'status', label: 'Status' },
+  { key: 'times', label: 'Times contacted' },
+  { key: 'last', label: 'Last contacted' },
+  { key: 'labels', label: 'Labels' },
+];
+
+function exportValue(r: LandRecord, key: string, labels: string[]): string | number {
+  switch (key) {
+    case 'apn': return r.apn;
+    case 'owner': return r.ownerName;
+    case 'phone': return r.phone;
+    case 'county': return r.county;
+    case 'state': return r.state;
+    case 'zip': return r.zip;
+    case 'acres': return r.acres;
+    case 'status': return statusConfig[r.status]?.label ?? r.status;
+    case 'times': return r.timesContacted;
+    case 'last': return r.lastContactedAt ?? '';
+    case 'labels': return labels.join('; ');
+    default: return '';
+  }
+}
 
 const STATUS_OPTIONS = Object.keys(statusConfig) as MarketingStatus[];
 const SORT_KEYS: PropertySort[] = ['apn', 'owner', 'county', 'acres', 'status', 'times', 'last'];
@@ -46,6 +80,7 @@ export function Records() {
   const pageSize = PAGE_SIZES.includes(sizeParam) ? sizeParam : 25;
 
   const debouncedQ = useDebouncedValue(q, 300);
+  const { accountId } = useAccountScope();
   const { data, isPending, isError, refetch } = usePropertiesQuery({
     search: debouncedQ,
     status,
@@ -56,6 +91,7 @@ export function Records() {
     dir,
     page,
     pageSize,
+    accountId,
   });
   const options = usePropertyFilterOptionsQuery();
 
@@ -85,6 +121,33 @@ export function Records() {
 
   const rows = data?.rows ?? [];
   const total = data?.total ?? 0;
+  const labelsQuery = usePropertyLabelsQuery(rows.map((r) => r.id));
+  const labelsByProperty = labelsQuery.data ?? {};
+  const labelOptions = useInboxFilterOptionsQuery();
+  const [exportOpen, setExportOpen] = useState(false);
+  const [exportBusy, setExportBusy] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
+
+  // Exports the properties matching the filters on this page, then keeps those with any chosen label.
+  const runExport = async ({ columns, labels }: { columns: string[]; labels: string[] }) => {
+    setExportBusy(true);
+    setExportError(null);
+    try {
+      const records = await exportProperties({ search: debouncedQ.trim(), status, state, county, zips, sort: sortKey, dir, accountId });
+      const labelMap = await getPropertyLabels(records.map((r) => r.id));
+      const wanted = new Set(labels);
+      const kept = records.filter((r) => wanted.size === 0 || (labelMap[r.id] ?? []).some((name) => wanted.has(name)));
+      const headers = columns.map((key) => PROPERTY_EXPORT_COLUMNS.find((c) => c.key === key)?.label ?? key);
+      const body = kept.map((r) => columns.map((key) => exportValue(r, key, labelMap[r.id] ?? [])));
+      const stamp = new Date().toISOString().slice(0, 10);
+      downloadCsv(`Properties_${stamp}.csv`, toCsv(headers, body));
+      setExportOpen(false);
+    } catch (error) {
+      setExportError(error instanceof Error ? error.message : 'Export failed.');
+    } finally {
+      setExportBusy(false);
+    }
+  };
   const allProperties = options.data?.total ?? total;
 
   const activeFilters: { key: string; label: string }[] = [
@@ -103,7 +166,24 @@ export function Records() {
         breadcrumbs={[{ label: 'Command Center', to: '/dashboard' }, { label: 'Properties' }]}
         title="Properties"
         description="Every property you own. Identified by APN, state and county, since most land has no street address."
+        actions={
+          <button type="button" className="btn-secondary h-9 px-3" disabled={total === 0} onClick={() => setExportOpen(true)}>
+            Export CSV
+          </button>
+        }
       />
+      {exportOpen && (
+        <ExportDialog
+          title="Export properties"
+          description={`Exports the ${total.toLocaleString('en-US')} properties that match the filters on this page. Choose labels to keep only those properties.`}
+          columns={PROPERTY_EXPORT_COLUMNS}
+          labelOptions={labelOptions.data?.labels ?? []}
+          busy={exportBusy}
+          error={exportError}
+          onClose={() => setExportOpen(false)}
+          onExport={runExport}
+        />
+      )}
 
       <div className="card space-y-4 p-4">
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
@@ -241,6 +321,21 @@ export function Records() {
               { key: 'acres', header: 'Acres', sortValue: (r) => r.acres, cell: (r) => formatAcres(r.acres), hideBelow: 'lg' },
               { key: 'status', header: 'Status', sortValue: (r) => r.status, cell: (r) => <StatusChip status={r.status} /> },
               {
+                key: 'labels',
+                header: 'Labels',
+                cell: (r) => {
+                  const names = labelsByProperty[r.id] ?? [];
+                  if (names.length === 0) return <span className="text-muted-foreground">—</span>;
+                  return (
+                    <div className="flex max-w-[220px] flex-wrap gap-1">
+                      {names.map((name) => (
+                        <span key={name} className="rounded-full bg-accent px-2 py-0.5 text-xs text-accent-foreground">{name}</span>
+                      ))}
+                    </div>
+                  );
+                },
+              },
+              {
                 key: 'times',
                 header: 'Times contacted',
                 sortValue: (r) => r.timesContacted,
@@ -260,6 +355,21 @@ export function Records() {
                   );
                 },
                 hideBelow: 'md',
+              },
+              {
+                key: 'action',
+                header: 'Action',
+                cell: (r) => (
+                  <Link
+                    to={`/properties/${r.id}`}
+                    aria-label={`Open property ${r.apn}`}
+                    title="Open property"
+                    className="inline-flex h-8 w-8 items-center justify-center rounded-md text-primary hover:bg-muted"
+                  >
+                    <Send size={16} aria-hidden="true" />
+                  </Link>
+                ),
+                className: 'text-center',
               },
             ]}
           />

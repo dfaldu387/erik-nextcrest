@@ -2,12 +2,27 @@ import type { LandRecord } from '@/data/types';
 import { planCampaignExport, type ExportPlan } from '@/lib/campaignExport';
 import { supabase } from '@/lib/supabase';
 import { getSuppressedPhones } from '@/services/nextcrestData';
+import { raiseAlert, resolveAlert } from '@/services/followUpEngine';
 
 // Every marketing export checks the opt-out lists first, so an export never uses a list that is up to an hour old.
+export const OPT_OUT_ALERT_KIND = 'opt_out_refresh_failed';
+
 export async function refreshOptOutList(): Promise<{ ok: true; refreshedAt: string } | { ok: false; message: string }> {
   if (!supabase) return { ok: false, message: 'NextCrest is not connected to its database.' };
+  const result = await requestOptOutRefresh(supabase);
+  // The dashboard warning follows the last check: raised on failure, cleared on success. A failure to record it must not block the export.
   try {
-    const { data, error } = await supabase.functions.invoke('smartercontact-sync', { body: { action: 'refresh-opt-outs' } });
+    if (result.ok) await resolveAlert(OPT_OUT_ALERT_KIND);
+    else await raiseAlert(OPT_OUT_ALERT_KIND, `Exports are blocked: ${result.message}`);
+  } catch {
+    // Recording the warning failed; the export result below still reports the real outcome.
+  }
+  return result;
+}
+
+async function requestOptOutRefresh(client: NonNullable<typeof supabase>): Promise<{ ok: true; refreshedAt: string } | { ok: false; message: string }> {
+  try {
+    const { data, error } = await client.functions.invoke('smartercontact-sync', { body: { action: 'refresh-opt-outs' } });
     if (error) {
       const response = (error as unknown as { context?: Response }).context;
       const details = (await response?.json?.().catch(() => null)) as { error?: string } | null;

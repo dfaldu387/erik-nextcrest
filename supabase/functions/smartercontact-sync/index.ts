@@ -33,6 +33,7 @@ const TOKEN_URL = 'https://api.smartercontact.com/rest/integration/oauth2/token'
 const SCOPES = 'contacts:read conversations:read conversations:write messages:write';
 const PRIMARY = 'primary';
 const CYCLE_LABEL_BATCH = 40;
+const CYCLE_PARCEL_BATCH = 150; // contacts read for their parcel (APN, county, state) per cycle, all accounts together
 const CYCLE_MESSAGES_BATCH = 30; // conversations read in full (last 50 messages) per cycle, all accounts together // conversations relabelled per cycle, all accounts together
 const CYCLE_DETAILS_BATCH = 60; // conversations dated per cycle, all accounts together
 const DETAILS_CONCURRENCY = 4;
@@ -381,6 +382,40 @@ async function detailsBatch(accountId: string, count: number, deadline: number):
   return { done, failed, rateLimited };
 }
 
+// SmarterContact's wrong-number label. Its phone is suppressed for marketing; the other numbers stay eligible.
+const WRONG_NUMBER_LABELS = ['WN', 'Wrong Number'];
+const WRONG_NUMBER_SOURCE = 'smartercontact:label';
+
+/**
+ * Adds or lifts the wrong-number suppression for one phone. Only changes when the label changed, so most contacts cost no
+ * writes. Lifting deletes only the suppression this sync created, never one set by hand or by an import.
+ */
+async function setWrongNumber(phone: string | null, flagged: boolean): Promise<void> {
+  if (!phone) return;
+  if (flagged) {
+    const upsert = await db.from('phone_numbers').upsert({ phone_number: phone }, { onConflict: 'phone_number', ignoreDuplicates: true });
+    if (upsert.error) throw new Error(`wrong number could not be saved: ${upsert.error.message}`);
+    const found = await db.from('phone_numbers').select('id').eq('phone_number', phone).single();
+    if (found.error || !found.data) throw new Error('phone number could not be read back');
+    const suppressed = await db.from('phone_suppressions').upsert(
+      { phone_number_id: found.data.id, suppression_type: 'wrong_number', source: WRONG_NUMBER_SOURCE },
+      { onConflict: 'phone_number_id,suppression_type', ignoreDuplicates: true },
+    );
+    if (suppressed.error) throw new Error(`wrong number could not be saved: ${suppressed.error.message}`);
+  } else {
+    const found = await db.from('phone_numbers').select('id').eq('phone_number', phone).maybeSingle();
+    if (found.error) throw new Error(`wrong number lookup failed: ${found.error.message}`);
+    if (!found.data) return;
+    const lifted = await db
+      .from('phone_suppressions')
+      .delete()
+      .eq('phone_number_id', found.data.id)
+      .eq('suppression_type', 'wrong_number')
+      .eq('source', WRONG_NUMBER_SOURCE);
+    if (lifted.error) throw new Error(`wrong number could not be lifted: ${lifted.error.message}`);
+  }
+}
+
 /** Labels the next batch of conversations of one account: never labelled first, then the ones labelled longest ago. */
 async function labelsBatch(accountId: string, count: number, deadline: number): Promise<{ done: number; failed: number; rateLimited: boolean }> {
   const api = apiFor(accountId);
@@ -388,7 +423,7 @@ async function labelsBatch(accountId: string, count: number, deadline: number): 
   const cutoff = new Date(Date.now() - LABEL_REFRESH_DAYS * 86_400_000).toISOString();
   const { data: due, error } = await db
     .from('smartercontact_conversations')
-    .select('contact_id')
+    .select('contact_id, phone, labels')
     .eq('account_id', accountId)
     .or(`labels_synced_at.is.null,labels_synced_at.lt.${cutoff}`)
     .order('labels_synced_at', { ascending: true, nullsFirst: true })
@@ -403,7 +438,20 @@ async function labelsBatch(accountId: string, count: number, deadline: number): 
     const contactId = row.contact_id as string;
     try {
       const contact = await api.getContact(contactId);
-      const labels = (contact.label_ids ?? []).map((id) => names.get(id)).filter((n): n is string => !!n);
+      const fromSmarterContact = (contact.label_ids ?? []).map((id) => names.get(id)).filter((n): n is string => !!n);
+      // Labels set in NextCrest win over SmarterContact's, so a later sync does not undo them. Nothing is written to SmarterContact.
+      const { data: override, error: overrideError } = await db
+        .from('conversation_label_overrides')
+        .select('labels')
+        .eq('contact_id', contactId)
+        .maybeSingle();
+      if (overrideError) throw new Error(overrideError.message);
+      const labels = override ? ((override.labels as string[] | null) ?? []) : fromSmarterContact;
+      // The suppression is written first: if it fails, the labels are not saved and the contact is retried next time.
+      const wasFlagged = ((row.labels as string[] | null) ?? []).some((name) => WRONG_NUMBER_LABELS.includes(name));
+      const isFlagged = labels.some((name) => WRONG_NUMBER_LABELS.includes(name));
+      // Flagged contacts are written every time (idempotent), so ones labelled before this change get their suppression too.
+      if (isFlagged || wasFlagged) await setWrongNumber(row.phone as string | null, isFlagged);
       const { error: updateError } = await db
         .from('smartercontact_conversations')
         .update({ labels, labels_synced_at: new Date().toISOString() })
@@ -412,6 +460,48 @@ async function labelsBatch(accountId: string, count: number, deadline: number): 
       done += 1;
     } catch (error) {
       if (isRateLimited(error)) return { done, failed, rateLimited: true };
+      failed += 1;
+    }
+  }
+  return { done, failed, rateLimited: false };
+}
+
+// ---------- parcels (APN, county, state) per conversation ----------
+
+/**
+ * Reads the APN, parcel county and parcel state from the contact's fields, for conversations whose parcel has never
+ * been read (sc_parcel_backlog). Each contact is stored once, even when a value is empty or the read fails, so one bad
+ * contact does not hold up the queue. A failed read is stored empty; delete its conversation_parcels row to read it again.
+ */
+async function parcelsBatch(accountId: string, count: number, deadline: number): Promise<{ done: number; failed: number; rateLimited: boolean }> {
+  const api = apiFor(accountId);
+  const { data: due, error } = await db.rpc('sc_parcel_backlog', { p_account_id: accountId, p_limit: count });
+  if (error) throw new Error(`Could not pick the next parcels batch: ${error.message}`);
+
+  let done = 0;
+  let failed = 0;
+  for (const row of (due ?? []) as { contact_id: string }[]) {
+    if (Date.now() > deadline) break;
+    const contactId = row.contact_id;
+    try {
+      const response = await api.getContactFields(contactId);
+      const value = (name: string): string | null => {
+        const found = (response.fields ?? []).find((f) => f.name.trim().toLowerCase() === name.toLowerCase());
+        const text = found?.value?.trim() ?? '';
+        return text.length > 0 ? text : null;
+      };
+      const { error: saveError } = await db.from('conversation_parcels').upsert(
+        { contact_id: contactId, apn: value('APN'), county: value('Parcel county'), state: value('Parcel state'), fields_synced_at: new Date().toISOString() },
+        { onConflict: 'contact_id' },
+      );
+      if (saveError) throw new Error(saveError.message);
+      done += 1;
+    } catch (error) {
+      if (isRateLimited(error)) return { done, failed, rateLimited: true };
+      await db.from('conversation_parcels').upsert(
+        { contact_id: contactId, apn: null, county: null, state: null, fields_synced_at: new Date().toISOString() },
+        { onConflict: 'contact_id' },
+      );
       failed += 1;
     }
   }
@@ -473,6 +563,17 @@ async function runCycle(): Promise<Record<string, unknown>> {
     }
   }
   summary.inbox = inbox;
+
+  // Parcels (APN, county, state) for the matching backfill. Runs early in the cycle, so the other steps cannot use up its time.
+  const parcels: Record<string, unknown> = {};
+  for (const account of accounts) {
+    try {
+      parcels[account.id] = await parcelsBatch(account.id, Math.max(5, Math.floor(CYCLE_PARCEL_BATCH / Math.max(1, accounts.length))), deadline);
+    } catch (error) {
+      parcels[`${account.id}Error`] = errorText(error);
+    }
+  }
+  summary.parcels = parcels;
 
   // Opted out and Deleted, re-listed in full about once an hour for each account. The time is recorded when the refresh
   // starts, so a refresh that fails is not retried every minute.

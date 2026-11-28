@@ -13,6 +13,7 @@ import { chunk, type PropertyInsert } from '@/lib/importCommit';
 import type { PhoneLink } from '@/lib/phones';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { InboxFilters } from '@/lib/inboxFilters';
+import { runQueue, withRetry } from '@/lib/insertQueue';
 
 // Single data boundary for the UI. Screens call these functions and never query the database directly.
 // Reads go through the browser client, so row-level security applies: a visitor who is not signed in
@@ -122,6 +123,83 @@ export async function getRecords(): Promise<DataResult<LandRecord[]>> {
   return wrap(records, supabase ? 'supabase' : 'none');
 }
 
+/**
+ * Sets the labels of one conversation in NextCrest only (set_conversation_labels_local, migration 057).
+ * SmarterContact is not changed. The sync keeps these labels instead of SmarterContact's.
+ */
+export async function setConversationLabelsLocal(contactId: string, labels: string[]): Promise<string[]> {
+  if (!supabase) throw new Error('NextCrest is not connected to its database.');
+  const { data, error } = await supabase.rpc('set_conversation_labels_local', { p_contact_id: contactId, p_labels: labels });
+  if (error) throw new Error(`Labels were not saved: ${error.message}`);
+  return (data ?? []) as string[];
+}
+
+function chunked<T>(items: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}
+
+/**
+ * The SmarterContact labels of each property: the labels of every conversation linked to it (sc_conversation_properties).
+ * Properties with no labelled conversation are left out of the result.
+ */
+export async function getPropertyLabels(propertyIds: string[]): Promise<Record<string, string[]>> {
+  const out: Record<string, string[]> = {};
+  if (!supabase || propertyIds.length === 0) return out;
+  const client = supabase;
+
+  const links: { property_id: string; contact_id: string }[] = [];
+  for (const part of chunked(propertyIds, 100)) {
+    const { data, error } = await client.from('sc_conversation_properties').select('property_id,contact_id').in('property_id', part);
+    if (error) throw new Error(`Could not load property labels: ${error.message}`);
+    links.push(...((data ?? []) as { property_id: string; contact_id: string }[]));
+  }
+
+  const labelsByContact = new Map<string, string[]>();
+  const contactIds = [...new Set(links.map((l) => l.contact_id))];
+  for (const part of chunked(contactIds, 100)) {
+    const { data, error } = await client.from('smartercontact_conversations').select('contact_id,labels').in('contact_id', part);
+    if (error) throw new Error(`Could not load property labels: ${error.message}`);
+    for (const row of (data ?? []) as { contact_id: string; labels: string[] | null }[]) {
+      labelsByContact.set(row.contact_id, row.labels ?? []);
+    }
+  }
+
+  for (const link of links) {
+    const labels = labelsByContact.get(link.contact_id) ?? [];
+    if (labels.length === 0) continue;
+    out[link.property_id] = [...new Set([...(out[link.property_id] ?? []), ...labels])].sort();
+  }
+  return out;
+}
+
+/** Every property matching the query (filters, search and account), read in pages of 1000 up to cap. */
+export async function exportProperties(query: Omit<PropertyQuery, 'page' | 'pageSize'>, cap = 20000): Promise<LandRecord[]> {
+  const rows: LandRecord[] = [];
+  for (let page = 1; rows.length < cap; page++) {
+    const result = await searchProperties({ ...query, page, pageSize: 1000 });
+    rows.push(...result.rows);
+    if (result.rows.length < 1000 || rows.length >= result.total) break;
+  }
+  return rows.slice(0, cap);
+}
+
+// The property ids of one SmarterContact account (account_property_ids, migration 052), read in pages of 1000.
+export async function getAccountPropertyIds(accountId: string): Promise<Set<string>> {
+  const ids = new Set<string>();
+  if (!supabase) return ids;
+  const pageSize = 1000;
+  for (let from = 0; ; from += pageSize) {
+    const { data, error } = await supabase.rpc('account_property_ids', { p_account_id: accountId }).range(from, from + pageSize - 1);
+    if (error) throw new Error(`Could not load this account's properties: ${error.message}`);
+    const rows = (data ?? []) as string[];
+    for (const id of rows) ids.add(id);
+    if (rows.length < pageSize) break;
+  }
+  return ids;
+}
+
 export async function getMarkets(): Promise<DataResult<Market[]>> {
   const records = await loadRecords();
   return wrap(buildMarkets(records), supabase ? 'supabase' : 'none');
@@ -139,6 +217,7 @@ export interface PropertyQuery {
   dir: 'asc' | 'desc';
   page: number; // 1-based
   pageSize: number;
+  accountId?: string | null; // SmarterContact account; only its linked properties. Missing means all properties.
 }
 
 export interface PropertyPage {
@@ -160,6 +239,8 @@ export async function searchProperties(query: PropertyQuery): Promise<PropertyPa
     p_dir: query.dir,
     p_limit: query.pageSize,
     p_offset: (query.page - 1) * query.pageSize,
+    // Sent only when an account is chosen, so the list keeps working before migration 050 is applied.
+    ...(query.accountId ? { p_account_id: query.accountId } : {}),
   });
   if (error) throw new Error(`Could not load properties: ${error.message}`);
   const rows = (data ?? []) as PropertySearchRow[];
@@ -229,6 +310,8 @@ export interface InboxQuery {
   sortDir: 'asc' | 'desc';
   page: number; // 1-based
   pageSize: number;
+  /** The SmarterContact account to show. Missing or null means all accounts. */
+  accountId?: string | null;
 }
 
 const INBOX_SELECT = 'contact_id,name,email,phone,folders,property_id,last_message,last_message_at,last_direction,labels';
@@ -249,6 +332,7 @@ function inboxRequest(query: Omit<InboxQuery, 'page' | 'pageSize'>) {
   if (!supabase) return null;
   const f = query.filters;
   let request = supabase.from('smartercontact_conversations').select(INBOX_SELECT, { count: 'exact' }).contains('folders', [query.folder]);
+  if (query.accountId) request = request.eq('account_id', query.accountId);
 
   const term = query.search.trim().replace(/[%,()*]/g, ' ').trim();
   if (term) request = request.or(`name.ilike.%${term}%,phone.ilike.%${term}%`);
@@ -266,6 +350,9 @@ function inboxRequest(query: Omit<InboxQuery, 'page' | 'pageSize'>) {
   if (f.responseFrom) request = request.gte('last_message_at', localDayStart(f.responseFrom));
   if (f.responseTo) request = request.lt('last_message_at', localDayStart(f.responseTo, 1));
   if (f.areaCodes.length > 0) request = request.or(f.areaCodes.map((code) => `phone.like.${code}*`).join(','));
+  if (f.propertyMatch === 'matched') request = request.not('property_id', 'is', null);
+  if (f.propertyMatch === 'unmatched') request = request.is('property_id', null);
+  if (f.minProperties > 0) request = request.gte('property_count', f.minProperties);
 
   const column = query.sortKey;
   return request.order(column, { ascending: query.sortDir === 'asc', nullsFirst: false }).order('name', { ascending: true });
@@ -429,15 +516,17 @@ export async function getSuppressedPhones(): Promise<Set<string>> {
 }
 
 // How many conversations are in each folder. A conversation can be in several folders.
-export async function getInboxCounts(): Promise<Record<InboxFolderKey, number>> {
+export async function getInboxCounts(accountId: string | null = null): Promise<Record<InboxFolderKey, number>> {
   const counts = Object.fromEntries(INBOX_FOLDER_OPTIONS.map((f) => [f.key, 0])) as Record<InboxFolderKey, number>;
   if (!supabase) return counts;
   // All folder counts at once (one request each), instead of one after another.
   const client = supabase;
   const results = await Promise.all(
-    INBOX_FOLDER_OPTIONS.map((folder) =>
-      client.from('smartercontact_conversations').select('contact_id', { count: 'exact', head: true }).contains('folders', [folder.key]),
-    ),
+    INBOX_FOLDER_OPTIONS.map((folder) => {
+      let request = client.from('smartercontact_conversations').select('contact_id', { count: 'exact', head: true }).contains('folders', [folder.key]);
+      if (accountId) request = request.eq('account_id', accountId);
+      return request;
+    }),
   );
   INBOX_FOLDER_OPTIONS.forEach((folder, index) => {
     const { count, error } = results[index];
@@ -587,6 +676,9 @@ export interface CommitResult {
 }
 
 const COMMIT_CHUNK_SIZE = 500;
+const SOURCE_FILES_MAX_CHARS = 4_000_000; // raw CSV text kept with a batch, above this it is not stored
+const COMMIT_CONCURRENCY = 2; // 500-row inserts in flight at once; 4 at once timed out on large imports
+const COMMIT_RETRIES = 4; // retries of a batch that hits a timeout or a dropped connection, with a longer wait each time
 
 // Links each property to its phone numbers. A number is stored once. A DNC flag turns on, and never off.
 // DNC numbers get a 'dnc' suppression, so exports can leave them out.
@@ -677,6 +769,9 @@ export async function commitImport(args: {
   if (!supabase) throw new Error('The database is not connected, so the import cannot be saved.');
   const client = supabase;
 
+  const sourceChars = (args.sourceFiles ?? []).reduce((sum, f) => sum + f.csv.length, 0);
+  const keepSourceFiles = sourceChars > 0 && sourceChars <= SOURCE_FILES_MAX_CHARS;
+
   const created = await client
     .from('import_batches')
     .insert({
@@ -690,8 +785,9 @@ export async function commitImport(args: {
       invalid_rows: args.counts.invalid,
       missing_apn_rows: args.counts.missingApn,
       status: 'processing',
-      has_source_file: Boolean(args.sourceFiles?.length),
-      source_files: args.sourceFiles?.length ? args.sourceFiles : null,
+      // The raw CSV text is kept only for modest batches. Large ones would make this one insert time out.
+      has_source_file: keepSourceFiles,
+      source_files: keepSourceFiles ? args.sourceFiles : null,
     })
     .select('id')
     .single();
@@ -705,19 +801,23 @@ export async function commitImport(args: {
   let failed = 0;
   let firstError: string | null = null;
   const propertyIds = new Map<string, string>();
+  // Batches of 500 rows, several in flight at once. A batch that fails on a timeout or a dropped connection is retried;
+  // a batch that still fails is counted as failed and the rest carry on.
   const pieces = chunk(rows, COMMIT_CHUNK_SIZE);
-
-  for (let i = 0; i < pieces.length; i += 1) {
-    const { data, error } = await client.from('properties').insert(pieces[i]).select('id,internal_id');
+  await runQueue(pieces, COMMIT_CONCURRENCY, async (piece) => {
+    const { data, error } = await withRetry(
+      () => client.from('properties').insert(piece).select('id,internal_id'),
+      COMMIT_RETRIES,
+    );
     if (error) {
-      failed += pieces[i].length;
+      failed += piece.length;
       firstError ??= error.message;
     } else {
-      committed += pieces[i].length;
+      committed += piece.length;
       for (const row of data ?? []) propertyIds.set(row.internal_id as string, row.id as string);
     }
     args.onProgress?.(Math.min(committed + failed, rows.length), rows.length);
-  }
+  });
 
   let phonesLinked = 0;
   let dncNumbers = 0;

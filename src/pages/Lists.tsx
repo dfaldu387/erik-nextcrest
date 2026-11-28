@@ -6,7 +6,7 @@ import { SearchableSelect } from '@/components/ui/SearchableSelect';
 import { SearchableMultiSelect } from '@/components/ui/SearchableMultiSelect';
 import { normalizeZip } from '@/lib/zip';
 import { CardSkeleton, ErrorState } from '@/components/ui/States';
-import { useRecordsQuery, useSuppressedPhonesQuery } from '@/hooks/useNextCrestData';
+import { useScopedRecords, useSuppressedPhonesQuery } from '@/hooks/useNextCrestData';
 import { EXCLUSION_REASONS, SMARTERCONTACT_HEADERS, planCampaignExport, toSmarterContactRow } from '@/lib/campaignExport';
 import { freshExportPlan } from '@/lib/exportOptOuts';
 import { downloadCsv, toCsv } from '@/lib/csv';
@@ -21,7 +21,7 @@ import type { MarketingStatus } from '@/data/types';
 const inputClass = 'field w-full';
 
 export function Lists() {
-  const { data, isPending, isError, refetch } = useRecordsQuery();
+  const { data, isPending, isError, refetch } = useScopedRecords();
   const [filters, setFilters] = useState<ListFilters>(emptyFilters);
   const [saved, setSaved] = useState<SavedList[]>(() => loadSavedLists());
   const [name, setName] = useState('');

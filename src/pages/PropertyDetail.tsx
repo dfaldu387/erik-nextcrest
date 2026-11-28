@@ -1,11 +1,14 @@
 import type { ReactNode } from 'react';
 import { useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
+import { DatePicker } from '@/components/ui/DatePicker';
 import { PageHeader } from '@/components/ui/PageHeader';
 import { CardSkeleton, EmptyState, ErrorState } from '@/components/ui/States';
 import { StatusChip } from '@/components/ui/StatusChip';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { getCountyMarket, getOwnerProperties, getPropertyRecord } from '@/services/nextcrestData';
+import { clearPropertyFollowUp, getChatDateSuggestion, getPropertyFollowUp, setPropertyFollowUp } from '@/services/followUpEngine';
+import { formatScheduleDate } from '@/lib/followUpSchedule';
 import type { LandRecord, MarketingStatus } from '@/data/types';
 import { normalizePhone } from '@/lib/campaignExport';
 import { daysSince, formatAcres, formatDate } from '@/lib/format';
@@ -391,14 +394,135 @@ function ResponsesTab({ record }: { record: LandRecord }) {
 
 function FollowUpsTab({ record }: { record: LandRecord }) {
   return (
-    <Panel title="Follow-ups">
-      <Facts
-        rows={[
-          ['Status', <StatusChip key="s" status={record.status} />],
-          ['What this means', followUpText[record.status]],
-          ['Assigned to', record.assignedTo ?? 'Unassigned'],
-        ]}
-      />
+    <div className="space-y-6">
+      <Panel title="Follow-ups">
+        <Facts
+          rows={[
+            ['Status', <StatusChip key="s" status={record.status} />],
+            ['What this means', followUpText[record.status]],
+            ['Assigned to', record.assignedTo ?? 'Unassigned'],
+          ]}
+        />
+      </Panel>
+      <ScheduledFollowUp propertyId={record.id} />
+    </div>
+  );
+}
+
+// "Follow Up On": a date the team sets. The property shows on the dashboard on that day and after it, until it is marked done.
+function ScheduledFollowUp({ propertyId }: { propertyId: string }) {
+  const queryClient = useQueryClient();
+  const current = useQuery({ queryKey: ['property-follow-up', propertyId], queryFn: () => getPropertyFollowUp(propertyId) });
+  const suggestion = useQuery({
+    queryKey: ['property-chat-suggestion', propertyId],
+    queryFn: () => getChatDateSuggestion(propertyId),
+    enabled: current.isSuccess && current.data === null,
+  });
+  const [date, setDate] = useState('');
+  const [note, setNote] = useState('');
+  const [message, setMessage] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const useSuggestion = async () => {
+    if (!suggestion.data) return;
+    setBusy(true);
+    setMessage(null);
+    const result = await setPropertyFollowUp(propertyId, suggestion.data.followUpOn, `From chat: "${suggestion.data.phrase}"`);
+    setBusy(false);
+    if (!result.ok) return setMessage(result.message);
+    setMessage('Follow-up saved from the chat.');
+    refreshSchedule();
+  };
+
+  const refreshSchedule = () => {
+    for (const key of ['property-follow-up', 'follow-up-schedule-counts', 'follow-up-schedule-due', 'follow-up-schedule-upcoming']) {
+      queryClient.invalidateQueries({ queryKey: [key] });
+    }
+  };
+
+  const save = async () => {
+    setBusy(true);
+    setMessage(null);
+    const result = await setPropertyFollowUp(propertyId, date, note);
+    setBusy(false);
+    if (!result.ok) return setMessage(result.message);
+    setDate('');
+    setNote('');
+    setMessage('Follow-up saved.');
+    refreshSchedule();
+  };
+
+  const markDone = async () => {
+    setBusy(true);
+    setMessage(null);
+    const result = await clearPropertyFollowUp(propertyId);
+    setBusy(false);
+    if (!result.ok) return setMessage(result.message);
+    setMessage('Follow-up marked done.');
+    refreshSchedule();
+  };
+
+  return (
+    <Panel title="Scheduled follow-up">
+      {current.isPending ? (
+        <p className="text-sm text-muted-foreground">Loading…</p>
+      ) : current.isError ? (
+        <ErrorState message="The scheduled follow-up could not be loaded." onRetry={() => current.refetch()} />
+      ) : current.data ? (
+        <Facts
+          rows={[
+            ['Follow up on', formatScheduleDate(current.data.followUpOn)],
+            ['Note', current.data.note ?? '—'],
+          ]}
+        />
+      ) : (
+        <p className="text-sm text-muted-foreground">Nothing scheduled.</p>
+      )}
+
+      {current.data === null && suggestion.data && (
+        <div className="rounded-[10px] border border-brand/30 bg-brand-tint p-3 text-sm">
+          <p>
+            <span className="font-medium">
+              {suggestion.data.status === 'overdue' ? 'Overdue from chat:' : 'Booked in chat:'}
+            </span>{' '}
+            {formatScheduleDate(suggestion.data.followUpOn)}
+            <span className="text-muted-foreground"> · you wrote &ldquo;{suggestion.data.phrase}&rdquo; on {formatDate(suggestion.data.sentAt)}</span>
+          </p>
+          {suggestion.data.status === 'overdue' && (
+            <p className="mt-1 text-muted-foreground">
+              Our team has not replied since this date. Mark it done once the call or visit is confirmed.
+            </p>
+          )}
+          {suggestion.data.sellerRepliedSince && (
+            <p className="mt-1 font-medium text-amber-700 dark:text-amber-300">
+              The seller has written since this date, and our team has not responded yet.
+            </p>
+          )}
+          <button type="button" className="btn-secondary mt-2" disabled={busy} onClick={useSuggestion}>Track this date</button>
+        </div>
+      )}
+
+      <div className="grid gap-3 sm:grid-cols-[240px_1fr]">
+        <label className="space-y-1 text-sm">
+          <span className="font-medium">Follow up on</span>
+          <DatePicker value={date} onChange={setDate} disabled={busy} />
+        </label>
+        <label className="space-y-1 text-sm">
+          <span className="font-medium">Note (optional)</span>
+          <input className="field w-full" value={note} maxLength={200} onChange={(e) => setNote(e.target.value)} disabled={busy} />
+        </label>
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <button type="button" className="btn-primary" disabled={busy || !date} onClick={save}>
+          {current.data ? 'Change date' : 'Schedule'}
+        </button>
+        {current.data && (
+          <button type="button" className="btn-secondary" disabled={busy} onClick={markDone}>
+            Mark done
+          </button>
+        )}
+        {message && <span role="status" className="text-sm text-muted-foreground">{message}</span>}
+      </div>
     </Panel>
   );
 }

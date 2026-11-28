@@ -22,6 +22,8 @@ interface ColumnSample {
   header: string;
   index: number;
   values: string[];
+  /** Share of the sampled rows that have a value. A column that is mostly empty is a weak match. */
+  filled: number;
 }
 
 function ratio(values: string[], test: (v: string) => boolean): number {
@@ -43,7 +45,7 @@ function distinctRatio(values: string[]): number {
 
 // Scores how well a column's values look like one target field, from 0 to 1.
 // Each target has a value test; the column's header only adds a small bonus.
-function valueScore(key: TargetKey, values: string[]): number {
+function valueScore(key: TargetKey, values: string[], hinted = false): number {
   switch (key) {
     case 'state':
       return ratio(values, (v) => /^[A-Za-z]{2}$/.test(v) && STATE_CODES.has(v.toUpperCase()));
@@ -51,14 +53,16 @@ function valueScore(key: TargetKey, values: string[]): number {
     case 'fips': {
       const fipsLike = ratio(values, (v) => /^\d{5}$/.test(v) && FIPS_STATE_PREFIXES.has(v.slice(0, 2)));
       const zipLike = ratio(values, (v) => /^\d{5}(-\d{4})?$/.test(v));
-      // Most 5-digit codes are also valid ZIPs, so values alone are not enough. The header decides.
-      return zipLike > 0.9 ? fipsLike * 0.5 : fipsLike;
+      // Most 5-digit codes are also valid ZIPs, so values alone are not enough. The header decides, so a column named
+      // FIPS keeps its full score.
+      return zipLike > 0.9 && !hinted ? fipsLike * 0.5 : fipsLike;
     }
 
     case 'zip': {
       const fipsLike = ratio(values, (v) => /^\d{5}$/.test(v) && FIPS_STATE_PREFIXES.has(v.slice(0, 2)));
       const zipLike = ratio(values, (v) => /^\d{5}(-\d{4})?$/.test(v));
-      return fipsLike > 0.9 ? zipLike * 0.5 : zipLike;
+      // Most real ZIP codes also look like FIPS codes, so the penalty only applies when the header does not say ZIP.
+      return fipsLike > 0.9 && !hinted ? zipLike * 0.5 : zipLike;
     }
 
     case 'phone':
@@ -93,11 +97,15 @@ function valueScore(key: TargetKey, values: string[]): number {
 
 function columnSamples(headers: string[], rows: string[][]): ColumnSample[] {
   const sample = rows.slice(0, SAMPLE_SIZE);
-  return headers.map((header, index) => ({
-    header: normalizeHeader(header),
-    index,
-    values: sample.map((r) => (r[index] ?? '').replace(/\s+/g, ' ').trim()).filter((v) => v !== ''),
-  }));
+  return headers.map((header, index) => {
+    const values = sample.map((r) => (r[index] ?? '').replace(/\s+/g, ' ').trim()).filter((v) => v !== '');
+    return {
+      header: normalizeHeader(header),
+      index,
+      values,
+      filled: sample.length === 0 ? 0 : values.length / sample.length,
+    };
+  });
 }
 
 export interface AutoMapResult {
@@ -113,8 +121,9 @@ export function autoMap(headers: string[], rows: string[][]): AutoMapResult {
   const candidates: { key: TargetKey; index: number; score: number }[] = [];
   for (const target of MAPPING_TARGETS) {
     for (const column of columns) {
-      const base = valueScore(target.key, column.values);
       const hinted = target.pattern.test(column.header);
+      // A column that is mostly empty gets a weaker score, so a sparse column cannot beat a full one.
+      const base = valueScore(target.key, column.values, hinted) * Math.min(1, column.filled * 2);
       // The header bonus is not capped, so it can separate two columns that look alike
       // (for example PROPERTY COUNTY and MAILING CITY). Confidence is capped separately.
       const score = base + (hinted ? HEADER_BONUS : 0);

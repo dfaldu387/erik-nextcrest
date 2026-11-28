@@ -2,13 +2,13 @@ import { useMemo } from 'react';
 import { DataTable } from '@/components/ui/DataTable';
 import { PageHeader } from '@/components/ui/PageHeader';
 import { CardSkeleton, EmptyState, ErrorState } from '@/components/ui/States';
-import { useRecordsQuery } from '@/hooks/useNextCrestData';
+import { useScopedRecords } from '@/hooks/useNextCrestData';
 import type { Campaign } from '@/data/types';
 import { formatCount, formatDate } from '@/lib/format';
 import { buildCampaigns } from '@/lib/metrics';
 
 export function Campaigns() {
-  const { data, isPending, isError, refetch } = useRecordsQuery();
+  const { data, isPending, isError, refetch } = useScopedRecords();
   const campaigns = useMemo(() => buildCampaigns(data?.data ?? []), [data]);
 
   const totals = campaigns.reduce(
